@@ -131,6 +131,22 @@ class MinimalOAuthServer:
                 media_type=metadata["mime_type"],
             )
 
+    def is_actually_running(self) -> bool:
+        """Check if the server is actually accepting connections on its port."""
+        if not self.is_running:
+            return False
+        try:
+            parsed_uri = urlparse(self.base_uri)
+            hostname = parsed_uri.hostname or "localhost"
+        except Exception:
+            hostname = "localhost"
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                return s.connect_ex((hostname, self.port)) == 0
+        except Exception:
+            return False
+
     def start(self) -> tuple[bool, str]:
         """
         Start the minimal OAuth server.
@@ -139,8 +155,12 @@ class MinimalOAuthServer:
             Tuple of (success: bool, error_message: str)
         """
         if self.is_running:
-            logger.info("Minimal OAuth server is already running")
-            return True, ""
+            if self.is_actually_running():
+                logger.info("Minimal OAuth server is already running")
+                return True, ""
+            else:
+                logger.warning("Minimal OAuth server was marked running but port is not responding. Restarting.")
+                self.is_running = False
 
         # Check if port is available
         # Extract hostname from base_uri (e.g., "http://localhost" -> "localhost")
@@ -256,7 +276,7 @@ def ensure_oauth_callback_available(
             logger.info(f"Creating minimal OAuth server instance for {base_uri}:{port}")
             _minimal_oauth_server = MinimalOAuthServer(port, base_uri)
 
-        if not _minimal_oauth_server.is_running:
+        if not _minimal_oauth_server.is_actually_running():
             logger.info("Starting minimal OAuth server for stdio mode")
             success, error_msg = _minimal_oauth_server.start()
             if success:
