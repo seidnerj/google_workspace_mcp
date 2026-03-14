@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import os
@@ -614,8 +615,11 @@ async def start_google_auth(
         from auth.oauth_config import get_oauth_config
 
         config = get_oauth_config()
-        success, error_msg = ensure_oauth_callback_available(
-            get_transport_mode(), config.port, config.base_uri
+        success, error_msg = await asyncio.to_thread(
+            ensure_oauth_callback_available,
+            get_transport_mode(),
+            config.port,
+            config.base_uri,
         )
         if not success:
             error_detail = f" ({error_msg})" if error_msg else ""
