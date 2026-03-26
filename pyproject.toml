@@ -56,6 +56,7 @@ Changelog = "https://github.com/taylorwilsdon/google_workspace_mcp/releases"
 
 [project.scripts]
 workspace-mcp = "main:main"
+workspace-cli = "core.cli:main"
 
 [project.optional-dependencies]
 disk = [

@@ -601,12 +601,16 @@ docker run -e TOOLS="gmail drive calendar" workspace-mcp
 
 </details>
 
-### CLI Mode
+### CLI
 
-The server supports a CLI mode for direct tool invocation without running the full MCP server. This is ideal for scripting, automation, and use by coding agents (Codex, Claude Code).
+#### `workspace-cli` — Persistent Token Storage
+
+The `workspace-cli` command wraps the FastMCP `Client` API with encrypted, disk-backed OAuth token caching. On first run it opens a browser for Google consent; subsequent runs reuse the cached tokens with no auth prompt.
+
+Tokens are stored encrypted at `~/.workspace-mcp/cli-tokens/` using a Fernet key auto-generated at `~/.workspace-mcp/.cli-encryption-key`.
 
 <details open>
-<summary>▶ <b>CLI Commands</b> <sub><sup>← Direct tool execution from command line</sup></sub></summary>
+<summary>▶ <b>workspace-cli Commands</b> <sub><sup>← Persistent OAuth, no re-auth on every call</sup></sub></summary>
 
 <table>
 <tr>
@@ -614,42 +618,77 @@ The server supports a CLI mode for direct tool invocation without running the fu
 
 **▶ List Tools**
 ```bash
-workspace-mcp --cli
-workspace-mcp --cli list
-workspace-mcp --cli list --json
+uv run workspace-cli list
+uv run workspace-cli --url https://custom.server/mcp list
 ```
 <sub>View all available tools</sub>
 
 </td>
 <td width="50%" align="center">
 
-**◆ Tool Help**
+**◆ Call a Tool**
 ```bash
-workspace-mcp --cli search_gmail_messages --help
+uv run workspace-cli call search_gmail_messages \
+  query="is:unread" max_results=5
 ```
-<sub>Show parameters and documentation</sub>
+<sub>Execute a tool with key=value arguments</sub>
+
+</td>
+</tr>
+</table>
+
+The default server URL is `https://mcp.workspacemcp.com/mcp`. Override it with `--url` or the `WORKSPACE_MCP_URL` environment variable.
+
+</details>
+
+#### FastMCP CLI
+
+The [FastMCP CLI](https://gofastmcp.com/cli) also ships with the server and can list tools, call them, inspect schemas, and install the server into any MCP client — all over Streamable HTTP with built-in OAuth. Note that `fastmcp` uses in-memory token storage by default, so each invocation may re-trigger the OAuth flow.
+
+<details>
+<summary>▶ <b>FastMCP CLI Commands</b> <sub><sup>← Interact with a running server from the command line</sup></sub></summary>
+
+<table>
+<tr>
+<td width="50%" align="center">
+
+**▶ List Tools**
+```bash
+fastmcp list https://mcp.workspacemcp.com/mcp
+fastmcp list fastmcp_server.py      # local introspection
+```
+<sub>View all available tools</sub>
+
+</td>
+<td width="50%" align="center">
+
+**◆ Call a Tool**
+```bash
+fastmcp call https://mcp.workspacemcp.com/mcp \
+  search_gmail_messages query="is:unread"
+```
+<sub>Execute a tool with key=value arguments</sub>
 
 </td>
 </tr>
 <tr>
 <td width="50%" align="center">
 
-**▶ Run with Arguments**
+**▶ Inspect Server**
 ```bash
-workspace-mcp --cli search_gmail_messages \
-  --args '{"query": "is:unread"}'
+fastmcp inspect fastmcp_server.py
 ```
-<sub>Execute tool with inline JSON</sub>
+<sub>Print tools, resources, and prompts summary</sub>
 
 </td>
 <td width="50%" align="center">
 
-**◆ Pipe from Stdin**
+**◆ Install into Clients**
 ```bash
-echo '{"query": "is:unread"}' | \
-  workspace-mcp --cli search_gmail_messages
+fastmcp install claude-code fastmcp_server.py
+fastmcp install cursor fastmcp_server.py
 ```
-<sub>Pass arguments via stdin</sub>
+<sub>One-command setup for Claude Code, Cursor, etc.</sub>
 
 </td>
 </tr>
@@ -658,48 +697,33 @@ echo '{"query": "is:unread"}' | \
 <details>
 <summary>≡ <b>CLI Usage Details</b> <sub><sup>← Complete reference</sup></sub></summary>
 
-**Command Structure:**
+**Authentication:**
+
+OAuth is handled automatically when targeting an HTTP URL. On first use, a browser window opens for Google consent. Use `--auth none` for local development servers that don't require auth.
+
 ```bash
-workspace-mcp --cli [command] [options]
+fastmcp list https://mcp.workspacemcp.com/mcp               # OAuth (default)
+fastmcp list https://mcp.workspacemcp.com/mcp --auth none    # skip auth
+fastmcp list https://mcp.workspacemcp.com/mcp --auth "Bearer sk-..."  # bearer token
 ```
-
-**Commands:**
-| Command | Description |
-|---------|-------------|
-| `list` (default) | List all available tools |
-| `<tool_name>` | Execute the specified tool |
-| `<tool_name> --help` | Show detailed help for a tool |
-
-**Options:**
-| Option | Description |
-|--------|-------------|
-| `--args`, `-a` | JSON string with tool arguments |
-| `--json`, `-j` | Output in JSON format (for `list` command) |
-| `--help`, `-h` | Show help for a tool |
 
 **Examples:**
 ```bash
-# List all Gmail tools
-workspace-mcp --cli list | grep gmail
+# List tools with full input schemas
+fastmcp list https://mcp.workspacemcp.com/mcp --input-schema
 
-# Search for unread emails
-workspace-mcp --cli search_gmail_messages --args '{"query": "is:unread", "max_results": 5}'
+# Call a tool with complex arguments
+fastmcp call https://mcp.workspacemcp.com/mcp search_gmail_messages \
+  query="is:unread" max_results=5
 
-# Get calendar events for today
-workspace-mcp --cli get_events --args '{"calendar_id": "primary", "time_min": "2024-01-15T00:00:00Z"}'
+# JSON output for scripting
+fastmcp list https://mcp.workspacemcp.com/mcp --json | jq '.tools[] | .name'
 
-# Create a Drive file from a URL
-workspace-mcp --cli create_drive_file --args '{"name": "doc.pdf", "source_url": "https://example.com/file.pdf"}'
-
-# Combine with jq for processing
-workspace-mcp --cli list --json | jq '.tools[] | select(.name | contains("gmail"))'
+# Discover servers already configured in your editors
+fastmcp discover
 ```
 
-**Notes:**
-- CLI mode uses OAuth 2.0 (same credentials as server mode)
-- Authentication flows work the same way - browser opens for first-time auth
-- Results are printed to stdout; errors go to stderr
-- Exit code 0 on success, 1 on error
+See `fastmcp --help` or the [FastMCP CLI docs](https://gofastmcp.com/cli) for the full command reference.
 
 </details>
 
