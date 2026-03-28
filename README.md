@@ -85,50 +85,35 @@ Workspace MCP is the single most complete MCP server that integrates all major G
 
 ## <span style="color:#adbcbc">Features</span>
 
-<table align="center" style="width: 100%; max-width: 100%;">
+> **12 services** &ensp;—&ensp; Gmail · Drive · Calendar · Docs · Sheets · Slides · Forms · Chat · Apps Script · Tasks · Contacts · Search
+
+<table>
 <tr>
-<td width="50%" valign="top">
+<td valign="top" width="50%">
 
-**<span style="color:#72898f">@</span> Gmail** • **<span style="color:#72898f">≡</span> Drive** • **<span style="color:#72898f">⧖</span> Calendar** **<span style="color:#72898f">≡</span> Docs**
-- Complete Gmail management, end-to-end coverage
-- Full calendar management with advanced features
-- File operations with Office format support
-- Document creation, editing & comments
-- Deep, exhaustive support for fine-grained editing
-
----
-
-**<span style="color:#72898f">≡</span> Forms** • **<span style="color:#72898f">@</span> Chat** • **<span style="color:#72898f">≡</span> Sheets** • **<span style="color:#72898f">≡</span> Slides**
-- Form creation, publish settings & response management
-- Space management & messaging capabilities
-- Spreadsheet operations with flexible cell management
-- Presentation creation, updates & content manipulation
-
----
-
-**<span style="color:#72898f">◆</span> Apps Script**
-- Automate cross-application workflows with custom code
-- Execute existing business logic and custom functions
-- Manage script projects, deployments & versions
-- Debug and modify Apps Script code programmatically
-- Bridge Google Workspace services through automation
+**📧 Gmail** — Complete email management, end-to-end coverage<br>
+**📁 Drive** — File operations with sharing, permissions & Office formats<br>
+**📅 Calendar** — Full event management with advanced features<br>
+**📝 Docs** — Deep, fine-grained editing, formatting & comments<br>
+**📊 Sheets** — Flexible cell management, formatting & conditional rules<br>
+**🖼️ Slides** — Presentation creation, updates & content manipulation<br>
+**📋 Forms** — Creation, publish settings & response management<br>
+**💬 Chat** — Space management, messaging & reactions
 
 </td>
-<td width="50%" valign="top">
+<td valign="top" width="50%">
 
-**<span style="color:#72898f">⊠</span> Authentication & Security**
-- Advanced OAuth 2.0 & OAuth 2.1 support
-- Automatic token refresh & session management
-- Transport-aware callback handling
-- Multi-user bearer token authentication
-- Innovative CORS proxy architecture
+**⚡ Apps Script** — Cross-application workflow automation<br>
+<sub>&ensp;Projects · deployments · versions · execution · debugging</sub>
+
+**✅ Tasks** — Task & list management with hierarchy<br>
+**👤 Contacts** — People API with groups & batch operations<br>
+**🔍 Custom Search** — Programmable Search Engine integration
 
 ---
 
-**<span style="color:#72898f">✓</span> Tasks** • **<span style="color:#72898f">👤</span> Contacts** • **<span style="color:#72898f">◆</span> Custom Search**
-- Task & task list management with hierarchy
-- Contact management via People API with groups
-- Programmable Search Engine (PSE) integration
+**🔐 Authentication & Security**<br>
+<sub>OAuth 2.0 & 2.1 · auto token refresh · multi-user bearer tokens · transport-aware callbacks · CORS proxy</sub>
 
 </td>
 </tr>
