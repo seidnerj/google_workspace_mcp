@@ -16,7 +16,12 @@ _original_stdout = sys.stdout
 if sys.platform == "darwin":
     sys.stdout = io.StringIO()
 
-from auth.oauth_config import reload_oauth_config, get_oauth_config, is_stateless_mode, is_service_account_enabled  # noqa: E402
+from auth.oauth_config import (
+    get_oauth_config,
+    reload_oauth_config,
+    is_stateless_mode,
+    is_service_account_enabled,
+)  # noqa: E402
 from core.log_formatter import EnhancedLogFormatter, configure_file_logging  # noqa: E402
 from core.utils import check_credentials_directory_permissions  # noqa: E402
 from core.server import server, set_transport_mode, configure_server_for_http  # noqa: E402
@@ -288,7 +293,9 @@ def main():
             "OAUTHLIB_INSECURE_TRANSPORT", "false"
         ),
         "GOOGLE_CLIENT_SECRET_PATH": os.getenv("GOOGLE_CLIENT_SECRET_PATH", "Not Set"),
-        "GOOGLE_SERVICE_ACCOUNT_KEY_FILE": os.getenv("GOOGLE_SERVICE_ACCOUNT_KEY_FILE", "Not Set"),
+        "GOOGLE_SERVICE_ACCOUNT_KEY_FILE": os.getenv(
+            "GOOGLE_SERVICE_ACCOUNT_KEY_FILE", "Not Set"
+        ),
     }
 
     for key, value in config_vars.items():
@@ -467,9 +474,7 @@ def main():
         user_email = os.getenv("USER_GOOGLE_EMAIL")
         if not user_email:
             safe_print("❌ Service account mode requires USER_GOOGLE_EMAIL to be set")
-            safe_print(
-                "   Set USER_GOOGLE_EMAIL to the domain user to impersonate"
-            )
+            safe_print("   Set USER_GOOGLE_EMAIL to the domain user to impersonate")
             sys.exit(1)
         # Validate service account key material before advertising readiness
         sa_config = get_oauth_config()
@@ -521,7 +526,9 @@ def main():
             logger.error(f"Failed credentials directory permission check: {e}")
             sys.exit(1)
     else:
-        skip_reason = "stateless mode" if is_stateless_mode() else "service account mode"
+        skip_reason = (
+            "stateless mode" if is_stateless_mode() else "service account mode"
+        )
         safe_print(f"🔍 Skipping credentials directory check ({skip_reason})")
         safe_print("")
 
