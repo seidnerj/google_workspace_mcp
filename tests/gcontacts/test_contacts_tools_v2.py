@@ -11,13 +11,24 @@ Covers:
 - Internal PBX type
 """
 
-import sys
+import json
 import os
+from difflib import unified_diff
+from pathlib import Path
+import sys
 import warnings
+
+import pytest
+
+from core.server import server
+from core.tool_registry import get_tool_components
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from gcontacts.contacts_tools import (
+    EmailInput,
+    OrganizationInput,
+    PhoneInput,
     _format_contact,
     _format_phone_line,
     _format_email_line,
@@ -28,6 +39,31 @@ from gcontacts.contacts_tools import (
     _normalize_phone,
     _normalize_email,
 )
+
+
+SCHEMA_GOLDEN_PATH = (
+    Path(__file__).with_name("golden").joinpath("contacts_tool_schemas.json")
+)
+
+
+def _schema_subset():
+    components = get_tool_components(server)
+    return {
+        name: components[name].parameters
+        for name in ("manage_contact", "manage_contacts_batch")
+    }
+
+
+def phone_input(**kwargs):
+    return PhoneInput(**kwargs)
+
+
+def email_input(**kwargs):
+    return EmailInput(**kwargs)
+
+
+def organization_input(**kwargs):
+    return OrganizationInput(**kwargs)
 
 
 # =============================================================================
@@ -168,8 +204,8 @@ class TestBuildPersonBodyNew:
     def test_phones_list(self):
         body = _build_person_body(
             phones=[
-                {"number": "+79270000000", "type": "mobile"},
-                {"number": "+78482123456", "type": "work"},
+                phone_input(number="+79270000000", type="mobile"),
+                phone_input(number="+78482123456", type="work"),
             ]
         )
         assert len(body["phoneNumbers"]) == 2
@@ -178,7 +214,7 @@ class TestBuildPersonBodyNew:
 
     def test_phones_with_label(self):
         body = _build_person_body(
-            phones=[{"number": "250", "type": "internal", "label": "АТС Greenline"}]
+            phones=[phone_input(number="250", type="internal", label="АТС Greenline")]
         )
         assert body["phoneNumbers"][0] == {
             "value": "250",
@@ -189,8 +225,8 @@ class TestBuildPersonBodyNew:
     def test_emails_list(self):
         body = _build_person_body(
             emails=[
-                {"address": "work@example.com", "type": "work"},
-                {"address": "personal@example.com", "type": "home"},
+                email_input(address="work@example.com", type="work"),
+                email_input(address="personal@example.com", type="home"),
             ]
         )
         assert len(body["emailAddresses"]) == 2
@@ -199,7 +235,7 @@ class TestBuildPersonBodyNew:
     def test_organizations_list(self):
         body = _build_person_body(
             organizations=[
-                {"name": "Greenline LLC", "title": "Director", "type": "work"},
+                organization_input(name="Greenline LLC", title="Director", type="work"),
             ]
         )
         assert body["organizations"][0] == {
@@ -210,13 +246,28 @@ class TestBuildPersonBodyNew:
 
     def test_organizations_with_department(self):
         body = _build_person_body(
-            organizations=[{"name": "Acme", "department": "Engineering"}]
+            organizations=[organization_input(name="Acme", department="Engineering")]
         )
         assert body["organizations"][0]["department"] == "Engineering"
 
+    def test_organizations_with_description(self):
+        body = _build_person_body(
+            organizations=[
+                organization_input(
+                    name="Acme",
+                    title="Manager",
+                    description="Primary employer",
+                )
+            ]
+        )
+        assert body["organizations"][0]["description"] == "Primary employer"
+
     def test_phones_empty_number_skipped(self):
         body = _build_person_body(
-            phones=[{"number": "", "type": "mobile"}, {"number": "+79270000000", "type": "work"}]
+            phones=[
+                phone_input(number="", type="mobile"),
+                phone_input(number="+79270000000", type="work"),
+            ]
         )
         assert len(body["phoneNumbers"]) == 1
         assert body["phoneNumbers"][0]["value"] == "+79270000000"
@@ -224,59 +275,89 @@ class TestBuildPersonBodyNew:
     def test_phones_value_key_fallback(self):
         """phones entries with 'value' key instead of 'number' still work."""
         body = _build_person_body(
-            phones=[{"value": "+79270000000", "type": "mobile"}]
+            phones=[phone_input(value="+79270000000", type="mobile")]
         )
         assert body["phoneNumbers"][0]["value"] == "+79270000000"
 
     def test_emails_value_key_fallback(self):
         """emails entries with 'value' key instead of 'address' still work."""
         body = _build_person_body(
-            emails=[{"value": "user@example.com", "type": "work"}]
+            emails=[email_input(value="user@example.com", type="work")]
         )
         assert body["emailAddresses"][0]["value"] == "user@example.com"
 
-    def test_phones_wins_over_deprecated_phone(self):
-        """When both phones and phone provided, phone alias ignored with warning."""
+    def test_phones_wins_over_deprecated_phone_without_warning(self):
+        """An explicit new-style list, even empty, wins over the deprecated alias."""
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
-                phones=[{"number": "+79270000000", "type": "mobile"}],
+                phones=[phone_input(number="+79270000000", type="mobile")],
                 phone="+70000000000",
             )
-            assert any("ignored" in str(warning.message) for warning in w)
-        # Only phones list should be used
+            assert not w
         assert len(body["phoneNumbers"]) == 1
         assert body["phoneNumbers"][0]["value"] == "+79270000000"
 
-    def test_emails_wins_over_deprecated_email(self):
-        """When both emails and email provided, email alias ignored with warning."""
+    def test_explicit_empty_phones_preserved_and_alias_not_used(self):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
-                emails=[{"address": "new@example.com", "type": "work"}],
+                phones=[],
+                phone="+70000000000",
+            )
+            assert not w
+        assert body["phoneNumbers"] == []
+
+    def test_emails_wins_over_deprecated_email_without_warning(self):
+        """An explicit new-style email list wins over the deprecated alias."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            body = _build_person_body(
+                emails=[email_input(address="new@example.com", type="work")],
                 email="old@example.com",
             )
-            assert any("ignored" in str(warning.message) for warning in w)
+            assert not w
         assert len(body["emailAddresses"]) == 1
         assert body["emailAddresses"][0]["value"] == "new@example.com"
 
-    def test_organizations_wins_over_deprecated_aliases(self):
-        """When both organizations and organization/job_title provided, aliases ignored."""
+    def test_explicit_empty_emails_preserved_and_alias_not_used(self):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
-                organizations=[{"name": "NewCorp", "type": "work"}],
+                emails=[],
+                email="old@example.com",
+            )
+            assert not w
+        assert body["emailAddresses"] == []
+
+    def test_organizations_wins_over_deprecated_aliases_without_warning(self):
+        """An explicit organizations list wins over the deprecated aliases."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            body = _build_person_body(
+                organizations=[organization_input(name="NewCorp", type="work")],
                 organization="OldCorp",
                 job_title="OldTitle",
             )
-            assert any("ignored" in str(warning.message) for warning in w)
+            assert not w
         assert len(body["organizations"]) == 1
         assert body["organizations"][0]["name"] == "NewCorp"
+
+    def test_explicit_empty_organizations_preserved_and_alias_not_used(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            body = _build_person_body(
+                organizations=[],
+                organization="OldCorp",
+                job_title="OldTitle",
+            )
+            assert not w
+        assert body["organizations"] == []
 
     def test_internal_phone_no_type_default_not_added(self):
         """phones without type field do not get a default type injected."""
         body = _build_person_body(
-            phones=[{"number": "+79270000000"}]
+            phones=[phone_input(number="+79270000000")]
         )
         assert "type" not in body["phoneNumbers"][0]
 
@@ -285,11 +366,11 @@ class TestBuildPersonBodyNew:
             given_name="Ivan",
             family_name="Petrov",
             phones=[
-                {"number": "+79270000000", "type": "mobile"},
-                {"number": "250", "type": "internal"},
+                phone_input(number="+79270000000", type="mobile"),
+                phone_input(number="250", type="internal"),
             ],
-            emails=[{"address": "ivan@example.com", "type": "work"}],
-            organizations=[{"name": "Greenline", "title": "CTO"}],
+            emails=[email_input(address="ivan@example.com", type="work")],
+            organizations=[organization_input(name="Greenline", title="CTO")],
             notes="Key contact",
             address="Moscow, Russia",
         )
@@ -483,11 +564,23 @@ class TestMergeOrganizations:
         result = _merge_organizations(existing, new, "merge")
         assert len(result) == 2
 
-    def test_merge_deduplicates_by_name(self):
+    def test_merge_deduplicates_by_composite_key_case_insensitive(self):
         existing = [{"name": "Greenline", "title": "CTO"}]
-        new = [{"name": "greenline", "title": "Director"}]
+        new = [{"name": "greenline", "title": "cto"}]
         result = _merge_organizations(existing, new, "merge")
         assert len(result) == 1
+
+    def test_merge_preserves_distinct_unnamed_orgs(self):
+        existing = [{"title": "CTO"}]
+        new = [{"department": "Engineering"}]
+        result = _merge_organizations(existing, new, "merge")
+        assert len(result) == 2
+
+    def test_remove_unnamed_org_uses_composite_key(self):
+        existing = [{"title": "CTO"}, {"department": "Engineering"}]
+        remove = [{"title": "CTO"}]
+        result = _merge_organizations(existing, remove, "remove")
+        assert result == [{"department": "Engineering"}]
 
     def test_replace(self):
         existing = [{"name": "OldCorp"}]
@@ -516,7 +609,7 @@ class TestMergeOrganizations:
 class TestInternalATSType:
     def test_build_internal_phone(self):
         body = _build_person_body(
-            phones=[{"number": "250", "type": "internal"}]
+            phones=[phone_input(number="250", type="internal")]
         )
         pn = body["phoneNumbers"][0]
         assert pn["value"] == "250"
@@ -579,8 +672,56 @@ class TestBuildPersonBodyBatch:
 
     def test_phones_and_notes_together(self):
         body = _build_person_body(
-            phones=[{"number": "+79270000000", "type": "mobile"}],
+            phones=[phone_input(number="+79270000000", type="mobile")],
             notes="Call after 10am",
         )
         assert "phoneNumbers" in body
         assert "biographies" in body
+
+
+class TestContactsToolSchemaGolden:
+    def test_contacts_tool_schema_matches_golden(self):
+        generated = _schema_subset()
+        golden = json.loads(SCHEMA_GOLDEN_PATH.read_text())
+
+        manage_contact_props = generated["manage_contact"]["properties"]
+        manage_contact_defs = generated["manage_contact"]["$defs"]
+        manage_batch_props = generated["manage_contacts_batch"]["properties"]
+        manage_batch_defs = generated["manage_contacts_batch"]["$defs"]
+
+        phones_items = manage_contact_defs["PhoneInput"]
+        emails_items = manage_contact_defs["EmailInput"]
+        org_items = manage_contact_defs["OrganizationInput"]
+
+        assert phones_items["additionalProperties"] is False
+        assert "number" in phones_items["properties"]
+        assert "value" in phones_items["properties"]
+        assert emails_items["additionalProperties"] is False
+        assert "address" in emails_items["properties"]
+        assert org_items["additionalProperties"] is False
+        assert "description" in org_items["properties"]
+
+        batch_contacts_items = manage_batch_defs["ContactInput"]
+        batch_updates_items = manage_batch_defs["ContactUpdateInput"]
+        assert batch_contacts_items["additionalProperties"] is False
+        assert "phones" in batch_contacts_items["properties"]
+        assert batch_updates_items["additionalProperties"] is False
+        assert "contact_id" in batch_updates_items["required"]
+        assert "field" in manage_batch_props
+        assert manage_contact_props["phones"]["anyOf"][0]["items"] == {
+            "$ref": "#/$defs/PhoneInput"
+        }
+
+        if generated != golden:
+            expected = json.dumps(golden, indent=2, sort_keys=True).splitlines()
+            actual = json.dumps(generated, indent=2, sort_keys=True).splitlines()
+            diff = "\n".join(
+                unified_diff(
+                    expected,
+                    actual,
+                    fromfile=str(SCHEMA_GOLDEN_PATH),
+                    tofile="generated",
+                    lineterm="",
+                )
+            )
+            pytest.fail(f"Contacts tool schema drifted from golden:\n{diff}")
