@@ -26,14 +26,14 @@ Ideally these patterns would be handled internally by the MCP tools (e.g., a sin
 
 ### How to use
 
-Copy the `SKILL.md` file to your Claude Code skills directory:
+This file is included automatically as part of the `managing-google-workspace` skill. Install that skill to use this guidance:
 
 ```bash
-mkdir -p ~/.claude/skills/create-google-doc-with-layout
-cp docs/skills/create-google-doc-with-layout/SKILL.md ~/.claude/skills/create-google-doc-with-layout/
+mkdir -p ~/.claude/skills/managing-google-workspace/references
+cp skills/managing-google-workspace/references/docs-layout-workflow.md ~/.claude/skills/managing-google-workspace/references/
 ```
 
-Claude Code will automatically discover and invoke it when creating formatted Google Docs.
+Claude Code will automatically discover and apply it when creating formatted Google Docs.
 
 ---
 
@@ -119,7 +119,7 @@ The table inserts invisible structural characters. To find where to continue:
 
 **ALWAYS export to PDF and visually verify layout before claiming done.**
 
-```
+```python
 mcp__google-workspace__export_doc_to_pdf(document_id="<doc_id>")
 ```
 
@@ -148,7 +148,7 @@ Then download and read the PDF to check:
 
 ## Quick Reference: Style Application
 
-```
+```python
 # Heading 1
 update_paragraph_style(start_index=X, end_index=Y, heading_level=1)
 
