@@ -326,7 +326,7 @@ async def _clear_completed_tasks_impl(
     title='Manage Task List',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -904,7 +904,7 @@ async def _move_task_impl(
     title='Manage Task',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

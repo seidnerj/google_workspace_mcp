@@ -1594,9 +1594,9 @@ async def get_gmail_messages_content_batch(
 @server.tool(
     title='Get Gmail Attachment Content',
     annotations=ToolAnnotations(
-        readOnlyHint=True,
+        readOnlyHint=False,
         destructiveHint=False,
-        idempotentHint=True,
+        idempotentHint=False,
         openWorldHint=True,
     ),
 )
@@ -2651,7 +2651,7 @@ async def list_gmail_labels(service, user_google_email: str) -> str:
     title='Manage Gmail Label',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2824,7 +2824,7 @@ async def list_gmail_filters(service, user_google_email: str) -> str:
     title='Manage Gmail Filter',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2901,7 +2901,7 @@ async def manage_gmail_filter(
     title='Modify Gmail Message Labels',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2967,7 +2967,7 @@ async def modify_gmail_message_labels(
     title='Batch Modify Gmail Message Labels',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

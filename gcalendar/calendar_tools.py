@@ -1300,7 +1300,7 @@ async def _rsvp_event_impl(
     title='Manage Event',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1776,7 +1776,7 @@ async def _delete_ooo_event_impl(
     title='Manage Out of Office',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2248,7 +2248,7 @@ async def _delete_focus_time_event_impl(
     title='Manage Focus Time',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

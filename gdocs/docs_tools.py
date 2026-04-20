@@ -1056,7 +1056,7 @@ async def update_doc_headers_footers(
     title='Batch Update Doc',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1908,9 +1908,9 @@ async def debug_table_structure(
 @server.tool(
     title='Export Doc to PDF',
     annotations=ToolAnnotations(
-        readOnlyHint=True,
+        readOnlyHint=False,
         destructiveHint=False,
-        idempotentHint=True,
+        idempotentHint=False,
         openWorldHint=True,
     ),
 )

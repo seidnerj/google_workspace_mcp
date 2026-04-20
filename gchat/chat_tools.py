@@ -602,9 +602,9 @@ async def create_reaction(
 @server.tool(
     title='Download Chat Attachment',
     annotations=ToolAnnotations(
-        readOnlyHint=True,
+        readOnlyHint=False,
         destructiveHint=False,
-        idempotentHint=True,
+        idempotentHint=False,
         openWorldHint=True,
     ),
 )

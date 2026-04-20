@@ -491,7 +491,7 @@ async def _batch_update_form_impl(
     title='Batch Update Form',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

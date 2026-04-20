@@ -367,9 +367,9 @@ async def get_drive_file_content(
 @server.tool(
     title='Get Drive File Download URL',
     annotations=ToolAnnotations(
-        readOnlyHint=True,
+        readOnlyHint=False,
         destructiveHint=False,
-        idempotentHint=True,
+        idempotentHint=False,
         openWorldHint=True,
     ),
 )
@@ -1466,7 +1466,7 @@ async def check_drive_file_public_access(
     title='Update Drive File',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1719,7 +1719,7 @@ async def get_drive_shareable_link(
     title='Manage Drive Access',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2174,7 +2174,7 @@ async def copy_drive_file(
     title='Set Drive File Permissions',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

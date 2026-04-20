@@ -11,9 +11,6 @@ from typing import List, Dict, Any, Optional
 from auth.service_decorator import require_google_service
 from core.server import server
 from mcp.types import ToolAnnotations
-
-from auth.service_decorator import require_google_service
-from core.server import server
 from core.utils import handle_http_errors
 
 logger = logging.getLogger(__name__)
@@ -350,7 +347,7 @@ async def _update_script_content_impl(
     title='Update Script Content',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -429,7 +426,7 @@ async def _run_script_function_impl(
     title='Run Script Function',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -519,7 +516,7 @@ async def _create_deployment_impl(
     title='Manage Deployment',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1368,7 +1365,7 @@ def _generate_trigger_code_impl(
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
-        openWorldHint=True,
+        openWorldHint=False,
     ),
 )
 async def generate_trigger_code(

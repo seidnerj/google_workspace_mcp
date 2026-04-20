@@ -854,7 +854,7 @@ async def search_contacts(
     title='Manage Contact',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1248,7 +1248,7 @@ async def get_contact_group(
     title='Manage Contacts Batch',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -1524,7 +1524,7 @@ async def manage_contacts_batch(
     title='Manage Contact Group',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

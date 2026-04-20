@@ -314,7 +314,7 @@ async def read_sheet_values(
     title='Modify Sheet Values',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -778,7 +778,7 @@ async def format_sheet_range(
     title='Manage Conditional Formatting',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -2045,7 +2045,7 @@ async def _resize_sheet_dimensions_impl(
     title='Resize Sheet Dimensions',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),

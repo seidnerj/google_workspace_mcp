@@ -169,7 +169,7 @@ Slides Breakdown:
     title='Batch Update Presentation',
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
