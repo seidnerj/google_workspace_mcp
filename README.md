@@ -1477,7 +1477,7 @@ The credential store automatically handles credential serialization, expiry pars
 ## <span style="color:#adbcbc">⊠ Security</span>
 - **Prompt Injection**: This MCP server has the capability to retrieve your email, calendar events and drive files. Those emails, events and files could potentially contain prompt injections - i.e. hidden white text that tells it to forward your emails to a different address. You should exercise caution and in general, only connect trusted data to an LLM!
 - **Credentials**: Never commit `.env`, `client_secret.json` or the `.credentials/` directory to source control!
-- **OAuth Callback**: Uses `http://localhost:8000/oauth2callback` for development (requires `OAUTHLIB_INSECURE_TRANSPORT=1`). If another process is already using port 8000, set `WORKSPACE_MCP_PORT` to a free port to avoid conflicts — e.g. `export WORKSPACE_MCP_PORT=8123`.
+- **OAuth Callback**: Uses `http://localhost:8000/oauth2callback` for development (requires `OAUTHLIB_INSECURE_TRANSPORT=1`). If another process is already using port 8000, set `WORKSPACE_MCP_PORT` to a free port to avoid conflicts — e.g. `export WORKSPACE_MCP_PORT=8123`. If you use a **web/confidential OAuth client** (not the recommended Desktop client), also update the redirect URI in Google Cloud Console to match the new port (e.g. `http://localhost:8123/oauth2callback`); Desktop and PKCE clients do not require this.
 - **Transport-Aware Callbacks**: Stdio mode starts a minimal HTTP server only for OAuth, ensuring callbacks work in all modes
 - **Production**: Use HTTPS & OAuth 2.1 and configure accordingly
 - **Scope Minimization**: Tools request only necessary permissions
