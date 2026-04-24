@@ -126,6 +126,9 @@ class LocalDirectoryCredentialStore(CredentialStore):
         collision-free mapping from email address to filename. The resolved
         path is validated to remain under base_dir.
         """
+        if not user_email or not user_email.strip():
+            raise ValueError("user_email must be a non-empty string")
+
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir, mode=0o700, exist_ok=True)
             logger.info(f"Created credentials directory: {self.base_dir}")
@@ -346,6 +349,8 @@ class GCSCredentialStore(CredentialStore):
 
     def _blob_name(self, user_email: str) -> str:
         """Construct the object key for a user, URL-encoding to prevent collisions."""
+        if not user_email or not user_email.strip():
+            raise ValueError("user_email must be a non-empty string")
         safe_email = quote(user_email, safe="@._-")
         return f"{self.prefix}{safe_email}{self.FILE_EXTENSION}"
 

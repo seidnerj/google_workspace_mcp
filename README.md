@@ -1478,7 +1478,7 @@ export WORKSPACE_MCP_GCS_REQUIRE_CMEK="true"                # optional; see belo
 
 By default GCS encrypts objects with Google-managed keys. For customer-managed encryption, set a default KMS key on the bucket (e.g. via Terraform's `google_storage_bucket.encryption.default_kms_key_name`). All credentials written to the bucket will inherit the key transparently — no application-level key to manage.
 
-To guard against accidentally deploying against a bucket without CMEK, set `WORKSPACE_MCP_GCS_REQUIRE_CMEK=true`. The store will verify the bucket has a default KMS key at startup and refuse to initialise otherwise. Note that this check reads bucket metadata, so the runtime service account additionally needs `storage.buckets.get` — grant `roles/storage.bucketViewer` on the bucket (or a custom role containing `storage.buckets.get`) in addition to the object-level role. `roles/storage.objectUser` alone covers only object operations.
+To guard against accidentally deploying against a bucket without CMEK, set `WORKSPACE_MCP_GCS_REQUIRE_CMEK=true`. The store will verify the bucket has a default KMS key at startup and refuse to initialize otherwise. Note that this check reads bucket metadata, so the runtime service account additionally needs `storage.buckets.get` — grant `roles/storage.bucketViewer` on the bucket (or a custom role containing `storage.buckets.get`) in addition to the object-level role. `roles/storage.objectUser` alone covers only object operations.
 
 **Usage Example:**
 ```python

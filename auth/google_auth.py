@@ -413,8 +413,8 @@ def _determine_oauth_prompt(
     # Fall back to credential file store in stateful mode.
     if not existing_credentials and not is_stateless_mode():
         try:
-            existing_credentials = get_credential_store().get_credential(
-                normalized_email
+            existing_credentials = await asyncio.to_thread(
+                get_credential_store().get_credential, normalized_email
             )
         except Exception as e:
             logger.debug(f"Could not read credential store for prompt choice: {e}")
@@ -580,7 +580,7 @@ async def start_auth_flow(
         raise Exception(error_text)
 
 
-def handle_auth_callback(
+async def handle_auth_callback(
     scopes: List[str],
     authorization_response: str,
     redirect_uri: str,
@@ -739,8 +739,8 @@ def handle_auth_callback(
 
             if not fallback_refresh_token and not is_stateless_mode():
                 try:
-                    existing_credentials = credential_store.get_credential(
-                        user_google_email
+                    existing_credentials = await asyncio.to_thread(
+                        credential_store.get_credential, user_google_email
                     )
                     if existing_credentials and existing_credentials.refresh_token:
                         fallback_refresh_token = existing_credentials.refresh_token
@@ -770,7 +770,9 @@ def handle_auth_callback(
                 )
 
         # Save the credentials
-        credential_store.store_credential(user_google_email, credentials)
+        await asyncio.to_thread(
+            credential_store.store_credential, user_google_email, credentials
+        )
 
         # Always save to OAuth21SessionStore for centralized management
         store.store_session(
