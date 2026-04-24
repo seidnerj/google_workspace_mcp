@@ -9,7 +9,7 @@ MCP tools for reading, creating, editing, and managing Google Docs. All tools re
 - Paragraph & List Styling: update_paragraph_style
 - Structural Elements: insert_doc_elements, create_table_with_data, insert_doc_image
 - Headers, Footers & Export: update_doc_headers_footers, export_doc_to_pdf
-- Tabs: insert_doc_tab, update_doc_tab, delete_doc_tab
+- Tabs: insert_doc_tab, update_doc_tab, delete_doc_tab, update_tab_from_markdown
 - Comments: list_document_comments, manage_document_comment
 - Inspection & Debugging: inspect_doc_structure, debug_table_structure
 - Batch Operations: batch_update_doc
@@ -230,6 +230,49 @@ Delete a tab by ID.
 | user_google_email | string | yes | | |
 | document_id | string | yes | | |
 | tab_id | string | yes | | Get from `inspect_doc_structure` |
+
+### update_tab_from_markdown
+
+Replace or append markdown content into a specific document tab. Parses
+CommonMark+GFM markdown and emits Docs API batchUpdate requests targeting
+the tab via `tab_id`.
+
+**Arguments**
+
+- `user_google_email` (str) - account to act as
+
+- `document_id` (str) - target Google Doc ID
+
+- `tab_id` (str) - target tab ID (from `insert_doc_tab` or `inspect_doc_structure`)
+
+- `markdown_text` (str) - markdown source to render
+
+- `replace_existing` (bool, default `True`) - clear tab body before insertion
+
+**Returns** - dict with `success`, `requests_applied` count, `tab_id`.
+
+**Supported markdown**
+
+Headings (H1-H6), paragraphs, bold/italic/code inline, links, ordered
+and unordered lists, fenced code blocks, blockquotes, horizontal rules.
+
+**Not yet supported**
+
+Images, tables (plain-text fallback), footnotes, smart chips, equations.
+
+**Example use**
+
+~~~python
+# First create the tab
+insert_doc_tab(document_id="...", title="Blog Article", index=0)
+# Then populate it from a markdown file
+update_tab_from_markdown(
+    document_id="...",
+    tab_id="t.0.5",
+    markdown_text=open("blog.md").read(),
+    replace_existing=True,
+)
+~~~
 
 ---
 

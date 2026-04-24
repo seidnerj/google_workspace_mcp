@@ -816,6 +816,7 @@ Saved files expire after 1 hour and are cleaned up automatically.
 | <sub>`debug_table_structure`</sub> | <sub>Complete</sub> | <sub>Debug table issues</sub> |
 | <sub>`list_document_comments`</sub> | <sub>Complete</sub> | <sub>List all document comments</sub> |
 | <sub>`manage_document_comment`</sub> | <sub>Complete</sub> | <sub>Create, reply to, or resolve comments</sub> |
+| <sub>`update_tab_from_markdown`</sub> | <sub>Complete</sub> | <sub>Populate a tab from markdown source</sub> |
 
 #### 📊 Google Sheets <sub>[`sheets_tools.py`](gsheets/sheets_tools.py)</sub>
 
