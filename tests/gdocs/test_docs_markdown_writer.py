@@ -34,3 +34,27 @@ def test_two_paragraphs_emit_two_inserts_with_correct_indices():
     # Second paragraph starts after first's text + newline
     assert inserts[1]["insertText"]["text"] == "Second para\n"
     assert inserts[1]["insertText"]["location"]["index"] == 1 + len("First para\n")
+
+
+def test_h1_emits_insert_and_heading_style():
+    requests = markdown_to_docs_requests("# My Title")
+    inserts = [r for r in requests if "insertText" in r]
+    styles = [r for r in requests if "updateParagraphStyle" in r]
+    assert len(inserts) == 1
+    assert inserts[0]["insertText"]["text"] == "My Title\n"
+    assert len(styles) == 1
+    assert styles[0]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"] == "HEADING_1"
+    # Range should cover the heading text
+    rng = styles[0]["updateParagraphStyle"]["range"]
+    assert rng["startIndex"] == 1
+    assert rng["endIndex"] == 1 + len("My Title\n")
+
+
+def test_h2_h3_h4_h5_h6_all_emit_correct_named_style():
+    for level in range(2, 7):
+        hashes = "#" * level
+        md = f"{hashes} Heading L{level}"
+        requests = markdown_to_docs_requests(md)
+        styles = [r for r in requests if "updateParagraphStyle" in r]
+        assert len(styles) == 1
+        assert styles[0]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"] == f"HEADING_{level}"

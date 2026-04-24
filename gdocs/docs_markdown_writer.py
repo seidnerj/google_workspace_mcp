@@ -51,6 +51,22 @@ def _emit_requests(tokens, requests, tab_id, start_index):
     i = 0
     while i < len(tokens):
         tok = tokens[i]
+
+        if tok.type == "heading_open":
+            level = int(tok.tag[1])  # 'h1' -> 1
+            inline_tok = tokens[i + 1]
+            text = _render_inline_plain(inline_tok.children or [])
+            text += "\n"
+            range_start = cursor[0]
+            requests.append(_build_insert_text(cursor[0], text, tab_id))
+            cursor[0] += len(text)
+            range_end = cursor[0]
+            requests.append(
+                _build_heading_style(range_start, range_end, level, tab_id)
+            )
+            i += 3
+            continue
+
         if tok.type == "paragraph_open":
             # paragraph_open is followed by inline (children), then paragraph_close
             inline_tok = tokens[i + 1]
@@ -60,6 +76,7 @@ def _emit_requests(tokens, requests, tab_id, start_index):
             cursor[0] += len(text)
             i += 3  # skip paragraph_open, inline, paragraph_close
             continue
+
         i += 1
 
 
@@ -85,3 +102,19 @@ def _build_insert_text(index: int, text: str, tab_id: Optional[str]) -> dict:
     if tab_id:
         location["tabId"] = tab_id
     return {"insertText": {"location": location, "text": text}}
+
+
+def _build_heading_style(
+    start: int, end: int, level: int, tab_id: Optional[str]
+) -> dict:
+    """Build updateParagraphStyle request setting HEADING_N named style."""
+    rng = {"startIndex": start, "endIndex": end}
+    if tab_id:
+        rng["tabId"] = tab_id
+    return {
+        "updateParagraphStyle": {
+            "range": rng,
+            "paragraphStyle": {"namedStyleType": f"HEADING_{level}"},
+            "fields": "namedStyleType",
+        }
+    }
