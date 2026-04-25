@@ -1,5 +1,6 @@
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,3 +59,46 @@ def test_permissions_and_tools_flags_are_rejected(monkeypatch, capsys):
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "--permissions and --tools cannot be combined" in captured.err
+
+
+def test_main_skips_gcs_store_initialization_in_service_account_mode(monkeypatch):
+    service_account_json = '{"type":"service_account","project_id":"p","private_key":"k","client_email":"svc@example.com"}'
+
+    def fail_if_called():
+        raise AssertionError("credential store should not be initialized")
+
+    def fail_permission_check():
+        raise AssertionError("local credential directory check should be skipped")
+
+    def fake_run(*args, **kwargs):  # noqa: ARG001
+        raise SystemExit(0)
+
+    monkeypatch.setattr(main, "configure_safe_logging", lambda: None)
+    monkeypatch.setattr(main, "import_module", lambda name: object())  # noqa: ARG005
+    monkeypatch.setattr(main, "set_enabled_tool_names", lambda names: None)
+    monkeypatch.setattr(main, "wrap_server_tool_method", lambda server: None)
+    monkeypatch.setattr(main, "filter_server_tools", lambda server: None)
+    monkeypatch.setattr(main, "set_transport_mode", lambda transport: None)
+    monkeypatch.setattr(main, "get_selected_backend", lambda: "gcs")
+    monkeypatch.setattr(main, "is_stateless_mode", lambda: False)
+    monkeypatch.setattr(main, "is_service_account_enabled", lambda: True)
+    monkeypatch.setattr(main, "get_credential_store", fail_if_called)
+    monkeypatch.setattr(
+        main, "check_credentials_directory_permissions", fail_permission_check
+    )
+    monkeypatch.setattr(
+        main,
+        "get_oauth_config",
+        lambda: SimpleNamespace(
+            service_account_key_file=None,
+            service_account_key_json=service_account_json,
+        ),
+    )
+    monkeypatch.setattr(main.server, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--tools", "gmail"])
+    monkeypatch.setenv("USER_GOOGLE_EMAIL", "user@example.com")
+
+    with pytest.raises(SystemExit) as exc:
+        main.main()
+
+    assert exc.value.code == 0
