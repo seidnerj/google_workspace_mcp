@@ -2474,6 +2474,9 @@ async def manage_doc_tab(
             .execute
         )
         tab_end = _find_tab_end_index(doc, tab_id)
+        if not tab_end:
+            raise UserInputError(f"'{tab_id}' not found in document")
+
         # tab_end includes the segment-terminating newline that Google Docs
         # refuses to delete, so we delete up to tab_end - 1. Empty tabs
         # (tab_end <= 2) have nothing to clear.

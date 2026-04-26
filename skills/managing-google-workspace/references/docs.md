@@ -214,7 +214,7 @@ Create, rename, delete, or populate tabs from markdown. Uses `action` to select 
 | index | integer | create | | 0-based position among sibling tabs |
 | parent_tab_id | string | no | | Nest under a parent tab (create only) |
 | markdown_text | string | populate | | Markdown source to render |
-| replace_existing | bool | no | `True` | Clear tab body before inserting markdown |
+| replace_existing | boolean | no | `True` | Clear tab body before inserting markdown |
 
 **Supported markdown** (populate_from_markdown action)
 

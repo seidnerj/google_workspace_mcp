@@ -11,6 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from core.utils import UserInputError
 from gdocs import docs_tools
 from gdocs.managers.batch_operation_manager import BatchOperationManager
 
@@ -149,6 +150,33 @@ async def test_populate_tab_accepts_empty_markdown_to_clear_existing_content():
             }
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_populate_tab_rejects_missing_tab_before_batch_update():
+    """Missing tabs should produce a user-facing error before request generation."""
+    service = Mock()
+    docs = service.documents.return_value
+    docs.get.return_value.execute.return_value = {
+        "tabs": [
+            {
+                "tabProperties": {"tabId": "t.exists"},
+                "documentTab": {"body": {"content": [{"endIndex": 1}]}},
+            }
+        ]
+    }
+
+    with pytest.raises(UserInputError, match="'t.missing' not found in document"):
+        await _unwrap(docs_tools.manage_doc_tab)(
+            service=service,
+            user_google_email="test@example.com",
+            document_id="doc-abc",
+            action="populate_from_markdown",
+            tab_id="t.missing",
+            markdown_text="Hello",
+        )
+
+    docs.batchUpdate.assert_not_called()
 
 
 class TestBatchOperationManagerExtractCreatedTabs:
