@@ -2201,20 +2201,20 @@ async def move_sheet_rows(
 
     # Find the last row with actual data in the destination sheet.
     # gridProperties.rowCount is the allocated grid size (e.g. 1000 for a new
-    # sheet), not the count of rows containing data.
+    # sheet), not the count of rows containing data.  Fetch all columns so the
+    # append position reflects any non-empty cell, not just column A.
     safe_destination = destination_sheet.replace("'", "''")
     dst_values = await asyncio.to_thread(
         service.spreadsheets()
         .values()
         .get(
             spreadsheetId=spreadsheet_id,
-            range=f"'{safe_destination}'!A:A",
-            majorDimension="COLUMNS",
+            range=f"'{safe_destination}'",
+            majorDimension="ROWS",
         )
         .execute
     )
-    dst_columns = dst_values.get("values", [])
-    dst_data_rows = len(dst_columns[0]) if dst_columns else 0
+    dst_data_rows = len(dst_values.get("values", []))
 
     num_rows = end_row - start_row + 1
     paste_start = dst_data_rows
