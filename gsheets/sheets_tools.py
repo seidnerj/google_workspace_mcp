@@ -1888,6 +1888,14 @@ async def _resize_sheet_dimensions_impl(
             )
             applied_parts.append(f"appended {insert_columns} column(s)")
 
+    # Reject mixing delete_rows and delete_row_range — their interleaved
+    # deleteDimension requests shift indices unpredictably.
+    if delete_rows and delete_row_range:
+        raise UserInputError(
+            "delete_rows and delete_row_range cannot be used together. "
+            "Specify one or the other."
+        )
+
     # Build delete row requests (process in reverse to keep indices stable)
     if delete_rows:
         if not isinstance(delete_rows, list):
@@ -2176,13 +2184,29 @@ async def move_sheet_rows(
     dst_id = dst["properties"]["sheetId"]
     dst_grid_rows = dst["properties"].get("gridProperties", {}).get("rowCount", 0)
 
+    # Validate that the source row block actually contains data.
+    safe_source = source_sheet.replace("'", "''")
+    src_range = f"'{safe_source}'!{start_row}:{end_row}"
+    src_values = await asyncio.to_thread(
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=src_range)
+        .execute
+    )
+    if not src_values.get("values"):
+        raise UserInputError(
+            f"Source range '{source_sheet}' rows {start_row}-{end_row} "
+            f"contains no data. Nothing to move."
+        )
+
     # Find the last row with actual data in the destination sheet.
     # gridProperties.rowCount is the allocated grid size (e.g. 1000 for a new
     # sheet), not the count of rows containing data.
+    safe_destination = destination_sheet.replace("'", "''")
     dst_values = await asyncio.to_thread(
         service.spreadsheets()
         .values()
-        .get(spreadsheetId=spreadsheet_id, range=f"'{destination_sheet}'")
+        .get(spreadsheetId=spreadsheet_id, range=f"'{safe_destination}'")
         .execute
     )
     dst_data_rows = len(dst_values.get("values", []))
