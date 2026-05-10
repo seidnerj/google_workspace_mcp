@@ -71,7 +71,7 @@ async def _list_script_projects_impl(
 
 
 @server.tool(
-    title='List Script Projects',
+    title="List Script Projects",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -151,7 +151,7 @@ async def _get_script_project_impl(
 
 
 @server.tool(
-    title='Get Script Project',
+    title="Get Script Project",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -217,7 +217,7 @@ async def _get_script_content_impl(
 
 
 @server.tool(
-    title='Get Script Content',
+    title="Get Script Content",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -282,7 +282,7 @@ async def _create_script_project_impl(
 
 
 @server.tool(
-    title='Create Script Project',
+    title="Create Script Project",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -344,7 +344,7 @@ async def _update_script_content_impl(
 
 
 @server.tool(
-    title='Update Script Content',
+    title="Update Script Content",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -423,7 +423,7 @@ async def _run_script_function_impl(
 
 
 @server.tool(
-    title='Run Script Function',
+    title="Run Script Function",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -432,7 +432,7 @@ async def _run_script_function_impl(
     ),
 )
 @handle_http_errors("run_script_function", service_type="script")
-@require_google_service("script", "script_projects")
+@require_google_service("script", "script_run")
 async def run_script_function(
     service: Any,
     user_google_email: str,
@@ -513,7 +513,7 @@ async def _create_deployment_impl(
 
 
 @server.tool(
-    title='Manage Deployment',
+    title="Manage Deployment",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -607,7 +607,7 @@ async def _list_deployments_impl(
 
 
 @server.tool(
-    title='List Deployments',
+    title="List Deployments",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -736,7 +736,7 @@ async def _list_script_processes_impl(
 
 
 @server.tool(
-    title='List Script Processes',
+    title="List Script Processes",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -792,7 +792,7 @@ async def _delete_script_project_impl(
 
 
 @server.tool(
-    title='Delete Script Project',
+    title="Delete Script Project",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -861,7 +861,7 @@ async def _list_versions_impl(
 
 
 @server.tool(
-    title='List Versions',
+    title="List Versions",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -927,7 +927,7 @@ async def _create_version_impl(
 
 
 @server.tool(
-    title='Create Version',
+    title="Create Version",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -996,7 +996,7 @@ async def _get_version_impl(
 
 
 @server.tool(
-    title='Get Version',
+    title="Get Version",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -1101,7 +1101,7 @@ async def _get_script_metrics_impl(
 
 
 @server.tool(
-    title='Get Script Metrics',
+    title="Get Script Metrics",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -1360,7 +1360,7 @@ def _generate_trigger_code_impl(
 
 
 @server.tool(
-    title='Generate Trigger Code',
+    title="Generate Trigger Code",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,

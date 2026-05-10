@@ -133,7 +133,7 @@ For parameters: [references/calendar.md](references/calendar.md)
 | Inspect structure | `inspect_doc_structure` |
 | Batch update (multiple ops) | `batch_update_doc` |
 | Headers/footers | `update_doc_headers_footers` |
-| Manage tabs | `insert_doc_tab` / `update_doc_tab` / `delete_doc_tab` |
+| Manage tabs | `manage_doc_tab` |
 | Export to PDF | `export_doc_to_pdf` |
 | List docs in folder | `list_docs_in_folder` |
 | Search docs | `search_docs` |
@@ -153,6 +153,7 @@ For parameters: [references/docs.md](references/docs.md)
 | Get spreadsheet info | `get_spreadsheet_info` |
 | Create spreadsheet | `create_spreadsheet` |
 | Create sheet (tab) | `create_sheet` |
+| Move rows between sheets | `move_sheet_rows` |
 | List spreadsheets | `list_spreadsheets` |
 | Comments | `manage_spreadsheet_comment` / `list_spreadsheet_comments` |
 

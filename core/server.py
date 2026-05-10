@@ -27,7 +27,7 @@ from auth.oauth_responses import (
     create_server_error_response,
 )
 from auth.auth_info_middleware import AuthInfoMiddleware
-from auth.scopes import BASE_SCOPES, SCOPES, get_current_scopes  # noqa
+from auth.scopes import PROTOCOL_AUTH_SCOPES, SCOPES, get_current_scopes  # noqa
 from core.config import (
     USER_GOOGLE_EMAIL,
     get_transport_mode,
@@ -171,6 +171,25 @@ def _parse_bool_env(value: str) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def _parse_allowed_redirect_uris(value: Optional[str]) -> Optional[List[str]]:
+    """Parse a comma-separated list of OAuth client redirect URIs.
+
+    Returns a list of non-empty, trimmed URIs, or None when the input is
+    empty/None. Returning None preserves FastMCP's default behaviour of
+    accepting any client-supplied redirect URI during DCR — callers that
+    want to lock down registration must supply a non-empty list.
+
+    Patterns supported by FastMCP's matcher (see
+    ``fastmcp.server.auth.redirect_validation``) include ``*`` for port
+    and path globs (e.g. ``http://localhost:*/callback``) and ``*.example.com``
+    for subdomain wildcards.
+    """
+    if not value:
+        return None
+    uris = [u.strip() for u in value.split(",") if u.strip()]
+    return uris or None
+
+
 def set_transport_mode(mode: str):
     """Sets the transport mode for the server."""
     _set_transport_mode(mode)
@@ -241,7 +260,7 @@ def configure_server_for_http():
             from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 
             provider_valid_scopes: List[str] = sorted(get_current_scopes())
-            provider_required_scopes: List[str] = sorted(BASE_SCOPES)
+            provider_required_scopes: List[str] = sorted(PROTOCOL_AUTH_SCOPES)
 
             client_storage = None
             jwt_signing_key_override = (
@@ -467,6 +486,7 @@ def configure_server_for_http():
                     redirect_path=config.redirect_path,
                     required_scopes=provider_valid_scopes,
                     resource_server_url=config.get_oauth_base_url(),
+                    jwt_signing_key=jwt_signing_key,
                 )
                 server.auth = provider
 
@@ -479,6 +499,14 @@ def configure_server_for_http():
                 )
             else:
                 # Standard OAuth 2.1 mode: use FastMCP's GoogleProvider
+                allowed_client_redirect_uris = _parse_allowed_redirect_uris(
+                    os.getenv("WORKSPACE_MCP_ALLOWED_CLIENT_REDIRECT_URIS")
+                )
+                if allowed_client_redirect_uris:
+                    logger.info(
+                        "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
+                        allowed_client_redirect_uris,
+                    )
                 provider = GoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
@@ -488,6 +516,7 @@ def configure_server_for_http():
                     valid_scopes=provider_valid_scopes,
                     client_storage=client_storage,
                     jwt_signing_key=jwt_signing_key,
+                    allowed_client_redirect_uris=allowed_client_redirect_uris,
                 )
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
@@ -496,6 +525,13 @@ def configure_server_for_http():
                     provider.client_registration_options.default_scopes = (
                         provider_valid_scopes
                     )
+                # CIMD clients can bypass DCR defaults and fall back to FastMCP's
+                # internal scope string, so keep it aligned with valid scopes too.
+                cimd_default_scope = " ".join(provider_valid_scopes)
+                provider._default_scope_str = cimd_default_scope
+                cimd_manager = getattr(provider, "_cimd_manager", None)
+                if cimd_manager is not None:
+                    cimd_manager.default_scope = cimd_default_scope
                 # Enable protocol-level auth
                 server.auth = provider
                 logger.info(
@@ -593,7 +629,7 @@ async def legacy_oauth2_callback(request: Request) -> HTMLResponse:
         if hasattr(request, "state") and hasattr(request.state, "session_id"):
             mcp_session_id = request.state.session_id
 
-        verified_user_id, credentials = handle_auth_callback(
+        verified_user_id, credentials = await handle_auth_callback(
             scopes=get_current_scopes(),
             authorization_response=str(request.url),
             redirect_uri=get_oauth_redirect_uri_for_current_mode(),
@@ -632,7 +668,7 @@ async def legacy_oauth2_callback(request: Request) -> HTMLResponse:
 
 
 @server.tool(
-    title='Start Google Auth',
+    title="Start Google Auth",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,

@@ -8,6 +8,7 @@ In stdio mode: Starts a minimal HTTP server just for OAuth callbacks
 import asyncio
 import errno
 import logging
+import os
 import threading
 import time
 import socket
@@ -86,11 +87,13 @@ class MinimalOAuthServer:
 
                 # Exchange code for credentials
                 redirect_uri = get_oauth_redirect_uri()
-                verified_user_id, credentials = handle_auth_callback(
+                verified_user_id, credentials = await handle_auth_callback(
                     scopes=get_current_scopes(),
                     authorization_response=str(request.url),
                     redirect_uri=redirect_uri,
                     session_id=None,
+                    allow_missing_state_fallback=os.getenv("MCP_SINGLE_USER_MODE")
+                    == "1",
                 )
 
                 logger.info(
@@ -134,14 +137,19 @@ class MinimalOAuthServer:
 
     def is_actually_running(self) -> bool:
         """
-        Check whether the callback port is currently usable.
+        Check whether *this* server instance owns the callback port.
 
-        A fresh MinimalOAuthServer starts with ``is_running=False`` in the constructor,
-        but ``ensure_oauth_callback_available()`` still calls this method before deciding
-        whether ``start()`` needs to bind the shared callback port. Keep the active
-        connection probe first, then treat ``EADDRINUSE`` from a short-lived bind as
-        another instance already owning the callback endpoint.
+        Returns False immediately if we have never called ``start()`` — a foreign
+        process listening on the same port must not be mistaken for our OAuth server.
+        Only after we have successfully started do we probe the port to confirm the
+        server thread is still alive and responding.
         """
+        # We never started — don't probe the port at all.  A foreign listener (e.g.
+        # another local web server) would make a raw TCP connect_ex succeed and cause
+        # is_actually_running() to return True, silently skipping OAuth setup.
+        if not self.is_running and self.server_thread is None:
+            return False
+
         if self.server_thread and not self.server_thread.is_alive():
             return False
         try:

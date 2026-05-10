@@ -396,7 +396,7 @@ def _strip_utc_offset(datetime_str: str) -> str:
 
 
 @server.tool(
-    title='List Calendars',
+    title="List Calendars",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -438,7 +438,7 @@ async def list_calendars(service, user_google_email: str) -> str:
 
 
 @server.tool(
-    title='Get Events',
+    title="Get Events",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -687,6 +687,7 @@ async def _create_event_impl(
     guests_can_modify: Optional[bool] = None,
     guests_can_invite_others: Optional[bool] = None,
     guests_can_see_other_guests: Optional[bool] = None,
+    send_updates: str = "all",
 ) -> str:
     """Internal implementation for creating a calendar event."""
     logger.info(
@@ -863,6 +864,7 @@ async def _create_event_impl(
                     body=event_body,
                     supportsAttachments=True,
                     conferenceDataVersion=1 if add_google_meet else 0,
+                    sendUpdates=send_updates,
                 )
                 .execute()
             )
@@ -875,6 +877,7 @@ async def _create_event_impl(
                     calendarId=calendar_id,
                     body=event_body,
                     conferenceDataVersion=1 if add_google_meet else 0,
+                    sendUpdates=send_updates,
                 )
                 .execute()
             )
@@ -950,6 +953,7 @@ async def _modify_event_impl(
     guests_can_modify: Optional[bool] = None,
     guests_can_invite_others: Optional[bool] = None,
     guests_can_see_other_guests: Optional[bool] = None,
+    send_updates: str = "all",
 ) -> str:
     """Internal implementation for modifying a calendar event."""
     logger.info(
@@ -1150,6 +1154,7 @@ async def _modify_event_impl(
                 eventId=event_id,
                 body=event_body,
                 conferenceDataVersion=1,
+                sendUpdates=send_updates,
             )
             .execute()
         )
@@ -1182,6 +1187,7 @@ async def _delete_event_impl(
     user_google_email: str,
     event_id: str,
     calendar_id: str = "primary",
+    send_updates: str = "all",
 ) -> str:
     """Internal implementation for deleting a calendar event."""
     logger.info(
@@ -1216,7 +1222,13 @@ async def _delete_event_impl(
     # Proceed with the deletion
     await asyncio.to_thread(
         lambda: (
-            service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+            service.events()
+            .delete(
+                calendarId=calendar_id,
+                eventId=event_id,
+                sendUpdates=send_updates,
+            )
+            .execute()
         )
     )
 
@@ -1239,12 +1251,6 @@ async def _rsvp_event_impl(
     if response not in valid_responses:
         raise ValueError(
             f"Invalid response '{response}'. Must be one of: {sorted(valid_responses)}"
-        )
-
-    valid_send_updates = {"all", "externalOnly", "none"}
-    if send_updates not in valid_send_updates:
-        raise ValueError(
-            f"Invalid send_updates '{send_updates}'. Must be one of: {sorted(valid_send_updates)}"
         )
 
     existing_event = await asyncio.to_thread(
@@ -1297,7 +1303,7 @@ async def _rsvp_event_impl(
 
 
 @server.tool(
-    title='Manage Event',
+    title="Manage Event",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -1363,12 +1369,20 @@ async def manage_event(
         guests_can_see_other_guests (Optional[bool]): Whether attendees can see other guests.
         response (Optional[str]): RSVP response — "accepted", "declined", "tentative", or "needsAction" (rsvp action only).
         rsvp_comment (Optional[str]): Optional message to include with the RSVP response (rsvp action only).
-        send_updates (Optional[str]): Notification behavior for RSVP — "all" (default), "externalOnly", or "none" (rsvp action only).
+        send_updates (Optional[str]): Notification behavior for create, update, delete, and rsvp — "all" (default), "externalOnly", or "none".
 
     Returns:
         str: Confirmation message with event details.
     """
     action_lower = action.lower().strip()
+
+    if send_updates is not None:
+        valid_send_updates = {"all", "externalOnly", "none"}
+        if send_updates not in valid_send_updates:
+            raise ValueError(
+                f"Invalid send_updates '{send_updates}'. Must be one of: {sorted(valid_send_updates)}"
+            )
+
     if action_lower == "create":
         if not summary or not start_time or not end_time:
             raise ValueError(
@@ -1397,6 +1411,7 @@ async def manage_event(
             guests_can_invite_others=guests_can_invite_others,
             guests_can_see_other_guests=guests_can_see_other_guests,
             recurrence=recurrence,
+            send_updates=send_updates or "all",
         )
     elif action_lower == "update":
         if not event_id:
@@ -1423,6 +1438,7 @@ async def manage_event(
             guests_can_modify=guests_can_modify,
             guests_can_invite_others=guests_can_invite_others,
             guests_can_see_other_guests=guests_can_see_other_guests,
+            send_updates=send_updates or "all",
         )
     elif action_lower == "delete":
         if not event_id:
@@ -1432,6 +1448,7 @@ async def manage_event(
             user_google_email=user_google_email,
             event_id=event_id,
             calendar_id=calendar_id,
+            send_updates=send_updates or "all",
         )
     elif action_lower == "rsvp":
         if not event_id:
@@ -1773,7 +1790,7 @@ async def _delete_ooo_event_impl(
 
 
 @server.tool(
-    title='Manage Out of Office',
+    title="Manage Out of Office",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -2245,7 +2262,7 @@ async def _delete_focus_time_event_impl(
 
 
 @server.tool(
-    title='Manage Focus Time',
+    title="Manage Focus Time",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -2367,7 +2384,7 @@ async def manage_focus_time(
 
 
 @server.tool(
-    title='Query Freebusy',
+    title="Query Freebusy",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -2483,7 +2500,7 @@ async def query_freebusy(
 
 
 @server.tool(
-    title='Create Calendar',
+    title="Create Calendar",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,

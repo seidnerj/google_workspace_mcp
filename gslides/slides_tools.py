@@ -8,19 +8,22 @@ import logging
 import asyncio
 from typing import List, Dict, Any
 
-
 from mcp.types import ToolAnnotations
 
 from auth.service_decorator import require_google_service
 from core.server import server
 from core.utils import handle_http_errors
 from core.comments import create_comment_tools
+from gslides.slides_helpers import (
+    validate_batch_update_requests,
+    validate_insert_text_targets,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
-    title='Create Presentation',
+    title="Create Presentation",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -65,7 +68,7 @@ async def create_presentation(
 
 
 @server.tool(
-    title='Get Presentation',
+    title="Get Presentation",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -166,7 +169,7 @@ Slides Breakdown:
 
 
 @server.tool(
-    title='Batch Update Presentation',
+    title="Batch Update Presentation",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -185,6 +188,17 @@ async def batch_update_presentation(
     """
     Apply batch updates to a Google Slides presentation.
 
+    Important:
+        Each request object must contain exactly one supported Slides request
+        type, such as createSlide, createShape, insertText, updateTextStyle,
+        createImage, or deleteObject.
+
+        insertText.objectId must be a text-capable shape or table object ID,
+        not a slide/page object ID. To add text to a slide, create a text box
+        or shape first with createShape, set elementProperties.pageObjectId to
+        the slide ID, and then insertText into that shape objectId. To edit
+        existing text, call get_page and use a Shape or Table element ID.
+
     Args:
         user_google_email (str): The user's Google email address. Required.
         presentation_id (str): The ID of the presentation to update.
@@ -196,6 +210,9 @@ async def batch_update_presentation(
     logger.info(
         f"[batch_update_presentation] Invoked. Email: '{user_google_email}', ID: '{presentation_id}', Requests: {len(requests)}"
     )
+
+    validate_batch_update_requests(requests)
+    await validate_insert_text_targets(service, presentation_id, requests)
 
     body = {"requests": requests}
 
@@ -234,7 +251,7 @@ async def batch_update_presentation(
 
 
 @server.tool(
-    title='Get Page',
+    title="Get Page",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -303,7 +320,7 @@ Page Elements:
 
 
 @server.tool(
-    title='Get Page Thumbnail',
+    title="Get Page Thumbnail",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,

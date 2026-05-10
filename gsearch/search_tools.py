@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @server.tool(
-    title='Search Custom',
+    title="Search Custom",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -174,7 +174,7 @@ async def search_custom(
 
 
 @server.tool(
-    title='Get Search Engine Info',
+    title="Get Search Engine Info",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,

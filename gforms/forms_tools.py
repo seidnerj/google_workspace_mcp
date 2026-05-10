@@ -119,7 +119,7 @@ def _serialize_form_item(item: Dict[str, Any], index: int) -> Dict[str, Any]:
 
 
 @server.tool(
-    title='Create Form',
+    title="Create Form",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -174,7 +174,7 @@ async def create_form(
 
 
 @server.tool(
-    title='Get Form',
+    title="Get Form",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -246,7 +246,7 @@ async def get_form(service, user_google_email: str, form_id: str) -> str:
 
 
 @server.tool(
-    title='Set Publish Settings',
+    title="Set Publish Settings",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
@@ -296,7 +296,7 @@ async def set_publish_settings(
 
 
 @server.tool(
-    title='Get Form Response',
+    title="Get Form Response",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -359,7 +359,7 @@ async def get_form_response(
 
 
 @server.tool(
-    title='List Form Responses',
+    title="List Form Responses",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -488,7 +488,7 @@ async def _batch_update_form_impl(
 
 
 @server.tool(
-    title='Batch Update Form',
+    title="Batch Update Form",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,

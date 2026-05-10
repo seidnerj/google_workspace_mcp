@@ -114,7 +114,7 @@ def _validate_rfc3339_date(due: str) -> None:
 
 
 @server.tool(
-    title='List Task Lists',
+    title="List Task Lists",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -180,7 +180,7 @@ async def list_task_lists(
 
 
 @server.tool(
-    title='Get Task List',
+    title="Get Task List",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -323,7 +323,7 @@ async def _clear_completed_tasks_impl(
 
 
 @server.tool(
-    title='Manage Task List',
+    title="Manage Task List",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -398,7 +398,7 @@ async def manage_task_list(
 
 
 @server.tool(
-    title='List Tasks',
+    title="List Tasks",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -650,7 +650,7 @@ This can also occur due to filtering that excludes parent tasks while including 
 
 
 @server.tool(
-    title='Get Task',
+    title="Get Task",
     annotations=ToolAnnotations(
         readOnlyHint=True,
         destructiveHint=False,
@@ -901,7 +901,7 @@ async def _move_task_impl(
 
 
 @server.tool(
-    title='Manage Task',
+    title="Manage Task",
     annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
