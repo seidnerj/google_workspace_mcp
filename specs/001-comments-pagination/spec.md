@@ -9,7 +9,7 @@
 
 ### User Story 1 - Retrieve All Comments from a Large Document (Priority: P1)
 
-A user asks an AI assistant to read comments from a Google Doc that has 50+ comments. The assistant calls the `read_document_comments` tool. Today, only the first 20 comments are returned silently, giving the user an incomplete picture. With this fix, all comments are returned automatically, up to a configurable maximum.
+A user asks an AI assistant to read comments from a Google Doc that has 50+ comments. The assistant calls the `list_document_comments` tool. Today, only the first 20 comments are returned silently, giving the user an incomplete picture. With this fix, all comments are returned automatically, up to a configurable maximum.
 
 **Why this priority**: This is the core bug fix. Users currently receive truncated results without any indication that comments are missing, leading to incorrect analysis and missed feedback.
 
@@ -17,9 +17,9 @@ A user asks an AI assistant to read comments from a Google Doc that has 50+ comm
 
 **Acceptance Scenarios**:
 
-1. **Given** a Google Doc with 50 comments, **When** a user calls `read_document_comments` with no parameters, **Then** all 50 comments are returned in a single response.
-2. **Given** a Google Doc with 150 comments, **When** a user calls `read_document_comments` with default settings, **Then** the first 100 comments are returned (server-wide default limit).
-3. **Given** a Google Doc with 150 comments, **When** a user calls `read_document_comments` with `max_comments` set to 150, **Then** all 150 comments are returned.
+1. **Given** a Google Doc with 50 comments, **When** a user calls `list_document_comments` with no parameters, **Then** all 50 comments are returned in a single response.
+2. **Given** a Google Doc with 150 comments, **When** a user calls `list_document_comments` with default settings, **Then** the first 100 comments are returned (server-wide default limit).
+3. **Given** a Google Doc with 150 comments, **When** a user calls `list_document_comments` with `max_comments` set to 150, **Then** all 150 comments are returned.
 
 ---
 
@@ -29,12 +29,12 @@ A user reads comments from Sheets and Slides documents, not just Docs. The pagin
 
 **Why this priority**: Equal to P1 because partial coverage would create inconsistent behavior across tools that users expect to work the same way.
 
-**Independent Test**: Can be tested by verifying `read_spreadsheet_comments` and `read_presentation_comments` return the same paginated results as `read_document_comments` for documents with more than 20 comments.
+**Independent Test**: Can be tested by verifying `list_spreadsheet_comments` and `list_presentation_comments` return the same paginated results as `list_document_comments` for documents with more than 20 comments.
 
 **Acceptance Scenarios**:
 
-1. **Given** a Google Sheet with 30 comments, **When** a user calls `read_spreadsheet_comments`, **Then** all 30 comments are returned.
-2. **Given** a Google Slides presentation with 40 comments, **When** a user calls `read_presentation_comments`, **Then** all 40 comments are returned.
+1. **Given** a Google Sheet with 30 comments, **When** a user calls `list_spreadsheet_comments`, **Then** all 30 comments are returned.
+2. **Given** a Google Slides presentation with 40 comments, **When** a user calls `list_presentation_comments`, **Then** all 40 comments are returned.
 
 ---
 
@@ -59,7 +59,7 @@ A server administrator wants to set a default maximum comment limit for all tool
 - What happens when a document has zero comments? The tool should return an empty list, same as today.
 - What happens when `max_comments` is set to 0? The tool should return an empty list (interpreted as "no comments requested").
 - What happens when the API returns fewer comments than `max_comments`? The tool should return all available comments without error.
-- What happens when the API returns an error mid-pagination? The tool should return the comments collected so far, or raise the error, consistent with existing error handling patterns in the project.
+- What happens when the API returns an error mid-pagination? The tool should re-raise the API error to the caller, consistent with existing error handling patterns in the project. Partial results collected before the error are discarded.
 - What happens when `max_comments` is negative? The tool should treat it as invalid input and use the default value.
 
 ## Requirements *(mandatory)*
@@ -76,7 +76,7 @@ A server administrator wants to set a default maximum comment limit for all tool
 ### Key Entities
 
 - **Comment**: A comment on a Google Workspace document, including its content, author, and any replies. Retrieved via the Google Drive Comments API.
-- **Comment Tool**: One of three MCP tools (`read_document_comments`, `read_spreadsheet_comments`, `read_presentation_comments`) that retrieve comments for a specific document type.
+- **Comment Tool**: One of three MCP tools (`list_document_comments`, `list_spreadsheet_comments`, `list_presentation_comments`) that retrieve comments for a specific document type.
 
 ## Success Criteria *(mandatory)*
 
@@ -86,6 +86,12 @@ A server administrator wants to set a default maximum comment limit for all tool
 - **SC-002**: All three comment tools (Docs, Sheets, Slides) behave identically with respect to pagination and limits.
 - **SC-003**: Existing callers that do not pass `max_comments` continue to work without modification, receiving up to 100 comments by default instead of 20.
 - **SC-004**: Server administrators can configure the default comment limit via a single environment variable.
+
+## Clarifications
+
+### Session 2026-06-08
+
+- Q: Should mid-pagination API errors return partial results or re-raise? → A: Re-raise the error; discard partial results. Consistent with standard error propagation patterns.
 
 ## Assumptions
 
