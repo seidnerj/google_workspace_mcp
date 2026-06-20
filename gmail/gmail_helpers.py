@@ -320,7 +320,9 @@ def _build_forward_content(
 
     # Derive the subject, avoiding a double prefix for existing "Fwd:"/"FW:".
     subject = subject_override or original_subject
-    if not subject_override and not subject.lower().lstrip().startswith(("fwd:", "fw:")):
+    if not subject_override and not subject.lower().lstrip().startswith(
+        ("fwd:", "fw:")
+    ):
         subject = f"Fwd: {original_subject}"
 
     return subject, forward_body, body_format
