@@ -295,3 +295,6 @@ async def test_require_multiple_services_optional_non_auth_error_reraises(monkey
 
     # The tool body never ran -- the non-auth error propagated.
     assert "func" not in events
+    # The already-opened Gmail service is still cleaned up on the re-raise path
+    # (no leak when an optional service fails non-auth).
+    assert events == ["close:gmail", "collect"]
