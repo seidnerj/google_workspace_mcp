@@ -1533,26 +1533,40 @@ def _prepare_gmail_message_web(
     pre-formatted; From is formatted here from ``from_email`` + optional
     ``from_name``.
     """
+
+    # Reject CR/LF in any user-controlled header value before assembly: bare
+    # newlines would let a crafted subject/recipient inject extra headers
+    # (RFC5322 header injection).
+    def _safe_header(field: str, value: str) -> str:
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"Invalid {field} header value: line breaks not allowed.")
+        return value
+
     # Author headers in Gmail's order. Message-ID is intentionally NOT authored
     # (Gmail assigns it on send/draft).
     headers: List[tuple[str, str]] = [("MIME-Version", "1.0")]
     if date_header:
-        headers.append(("Date", date_header))
+        headers.append(("Date", _safe_header("Date", date_header)))
     if references:
         # Fold the References chain with CRLF + TAB per RFC5322 continuation.
-        folded = "\r\n\t".join(references.split())
+        folded = "\r\n\t".join(_safe_header("References", references).split())
         headers.append(("References", folded))
     if in_reply_to:
-        headers.append(("In-Reply-To", in_reply_to))
+        headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
     if bcc:
-        headers.append(("Bcc", bcc))
-    headers.append(("Subject", subject))
+        headers.append(("Bcc", _safe_header("Bcc", bcc)))
+    headers.append(("Subject", _safe_header("Subject", subject)))
     if from_email:
-        headers.append(("From", format_display_address(from_name, from_email)))
+        headers.append(
+            (
+                "From",
+                _safe_header("From", format_display_address(from_name, from_email)),
+            )
+        )
     if to:
-        headers.append(("To", to))
+        headers.append(("To", _safe_header("To", to)))
     if cc:
-        headers.append(("Cc", cc))
+        headers.append(("Cc", _safe_header("Cc", cc)))
 
     message = assemble_alternative(
         headers=headers,
@@ -2830,6 +2844,20 @@ async def send_gmail_message(
         )
     else:
         name_note = ""
+        # Derive reply headers for the attachments path too, so thread replies
+        # with attachments thread identically to those without (the web path
+        # above already does this internally).
+        if thread_id and (not in_reply_to or not references):
+            context = await _fetch_thread_reply_context(
+                service,
+                thread_id,
+                in_reply_to=in_reply_to,
+                include_bodies=False,
+            )
+            message_ids = context.get("message_ids", []) if context else []
+            in_reply_to, references = _derive_reply_headers(
+                message_ids, in_reply_to, references
+            )
         raw_message, thread_id_final, attached_count, attachment_errors = (
             _prepare_gmail_message(
                 subject=subject,

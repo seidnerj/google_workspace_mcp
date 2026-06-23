@@ -952,11 +952,15 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
                             services_created = True
 
                         except Exception as e:
-                            # Optional services degrade gracefully: a missing scope
-                            # (or any auth failure) injects None instead of failing the
-                            # whole tool, so the primary action still runs. The tool is
-                            # expected to detect None and report the fallback.
-                            if config.get("optional", False):
+                            # Optional services degrade gracefully on AUTH failure
+                            # only: a missing scope (or other auth error) injects None
+                            # instead of failing the whole tool, so the primary action
+                            # still runs and the tool reports the fallback. Non-auth
+                            # errors are NOT hidden — they re-raise even for optional
+                            # services so real bugs surface.
+                            if config.get("optional", False) and isinstance(
+                                e, GoogleAuthenticationError
+                            ):
                                 logger.info(
                                     f"[{tool_name}] Optional service '{service_type}' "
                                     f"unavailable for {user_google_email} "

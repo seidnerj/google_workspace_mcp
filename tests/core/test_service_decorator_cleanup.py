@@ -241,3 +241,57 @@ async def test_require_multiple_services_optional_failure_injects_none(monkeypat
     assert result == "ran"
     # Tool ran; only the gmail service was created/closed.
     assert events == ["func", "close:gmail", "collect"]
+
+
+@pytest.mark.asyncio
+async def test_require_multiple_services_optional_non_auth_error_reraises(monkeypatch):
+    """An optional service that fails with a NON-auth error must NOT be swallowed
+    -- only authentication failures degrade gracefully. Real bugs surface."""
+    _patch_common_decorator_state(monkeypatch)
+    events = []
+    gmail_service = _FakeService("gmail", events)
+
+    async def fake_authenticate_service(
+        use_oauth21,
+        service_name,
+        service_version,
+        tool_name,
+        user_google_email,
+        resolved_scopes,
+        mcp_session_id,
+        authenticated_user,
+    ):
+        if service_name == "gmail":
+            return gmail_service, user_google_email
+        # A non-auth failure (e.g. a bug building the optional service).
+        raise RuntimeError("unexpected boom")
+
+    monkeypatch.setattr(
+        service_decorator, "_authenticate_service", fake_authenticate_service
+    )
+    monkeypatch.setattr(
+        service_decorator,
+        "_release_google_service_cycles",
+        lambda: events.append("collect"),
+    )
+
+    @service_decorator.require_multiple_services(
+        [
+            {"service_type": "gmail", "scopes": "gmail_read", "param_name": "service"},
+            {
+                "service_type": "people",
+                "scopes": "contacts_read",
+                "param_name": "people_service",
+                "optional": True,
+            },
+        ]
+    )
+    async def sample_tool(service, people_service, user_google_email: str):
+        events.append("func")
+        return "ran"
+
+    with pytest.raises(RuntimeError, match="unexpected boom"):
+        await sample_tool(user_google_email="user@example.com")
+
+    # The tool body never ran -- the non-auth error propagated.
+    assert "func" not in events

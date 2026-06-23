@@ -606,3 +606,64 @@ async def test_reply_without_parent_sends_without_quote():
     # Still multipart with both parts.
     assert 'text/plain; charset="UTF-8"' in msg
     assert 'text/html; charset="UTF-8"' in msg
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_crlf_header_injection_in_subject():
+    """A CR/LF-laden subject must be rejected, not folded into extra headers."""
+    gmail = _gmail_service()
+    people = _people_service_empty()
+
+    with pytest.raises(ValueError):
+        await _unwrap(send_gmail_message)(
+            service=gmail,
+            people_service=people,
+            user_google_email="grace@example.org",
+            to="ada@example.com",
+            subject="Meeting\r\nBcc: sneaky@example.com",
+            body="Hello there",
+            include_signature=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_with_attachments_derives_reply_headers(monkeypatch):
+    """Thread replies with attachments must derive In-Reply-To/References too,
+    matching the no-attachments web path."""
+    import gmail.gmail_tools as gt
+
+    gmail = _gmail_service()
+    people = _people_service_empty()
+
+    async def fake_resolve(_attachments):
+        return [{"data": b"x", "filename": "a.txt", "mime_type": "text/plain"}]
+
+    async def fake_context(service, thread_id, in_reply_to=None, include_bodies=False):
+        return {"message_ids": ["<first@example.com>", "<second@example.com>"]}
+
+    captured = {}
+
+    def fake_prepare(**kwargs):
+        captured.update(kwargs)
+        return ("rawmsg", kwargs.get("thread_id"), 1, [])
+
+    monkeypatch.setattr(gt, "_resolve_url_attachments", fake_resolve)
+    monkeypatch.setattr(gt, "_fetch_thread_reply_context", fake_context)
+    monkeypatch.setattr(gt, "_prepare_gmail_message", fake_prepare)
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        people_service=people,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Re: Project sync",
+        body="See attached",
+        thread_id="thread123",
+        attachments=[{"filename": "a.txt", "content": "eA=="}],
+        include_signature=False,
+    )
+
+    # Reply headers were derived from the thread message-id chain.
+    assert captured["in_reply_to"] == "<second@example.com>"
+    assert "<first@example.com>" in captured["references"]
+    assert "<second@example.com>" in captured["references"]
