@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlparse, urlunsplit
 
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr
+from email.utils import formataddr, getaddresses, parseaddr
 
 import httpx
 from mcp.types import ToolAnnotations
@@ -27,7 +27,10 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from googleapiclient.errors import HttpError
 
-from auth.service_decorator import require_google_service
+from auth.service_decorator import (
+    require_google_service,
+    require_multiple_services,
+)
 from core.attachment_storage import get_attachment_storage, STORAGE_DIR
 from core.config import (
     WORKSPACE_EXTERNAL_URL,
@@ -57,7 +60,20 @@ from gmail.gmail_helpers import (
     _analyze_thread_ownership_impl,
     _build_forward_content,
     _is_benign_signature_http_error,
+    _parse_date_header,
     _signature_fetch_tool_error,
+)
+from gmail.gmail_web_mime import (
+    assemble_alternative,
+    build_quote_container_html,
+    build_quote_plain,
+    encode_raw,
+    format_attribution_html,
+    format_attribution_plain,
+    format_display_address,
+    gmail_boundary,
+    new_message_html,
+    plain_body_to_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -687,6 +703,236 @@ def _parse_message_id_chain(header_value: Optional[str]) -> List[str]:
     return header_value.split()
 
 
+# People API readMask for name lookups: names + the emails to match against.
+_PEOPLE_NAME_READ_MASK = "names,emailAddresses"
+
+
+async def _lookup_display_name(
+    people_service,
+    email: str,
+    cache: Dict[str, Optional[str]],
+) -> Optional[str]:
+    """Best-effort People API lookup of a display name for ``email``.
+
+    Returns the display name, or None when no contact matches or the lookup
+    fails for any reason (graceful degradation -- the send must never fail
+    because a name could not be resolved). Results are memoized in ``cache``.
+    """
+    key = email.strip().lower()
+    if key in cache:
+        return cache[key]
+
+    name: Optional[str] = None
+    if people_service is not None and key:
+        try:
+            result = await asyncio.to_thread(
+                people_service.people()
+                .searchContacts(query=email, readMask=_PEOPLE_NAME_READ_MASK)
+                .execute
+            )
+            for item in result.get("results", []):
+                person = item.get("person", {})
+                emails = [
+                    (e.get("value") or "").strip().lower()
+                    for e in person.get("emailAddresses", [])
+                ]
+                if key in emails:
+                    names = person.get("names", [])
+                    if names:
+                        candidate = names[0].get("displayName") or ""
+                        if candidate.strip():
+                            name = candidate.strip()
+                    break
+        except Exception as e:
+            logger.info(
+                "People name lookup failed for an address; using bare address: %s", e
+            )
+            name = None
+
+    cache[key] = name
+    return name
+
+
+async def _format_address_list_with_names(
+    people_service,
+    header_value: Optional[str],
+    cache: Dict[str, Optional[str]],
+) -> Optional[str]:
+    """Format a To/Cc/Bcc header value as ``Display Name <addr>`` per address.
+
+    Parses the header (RFC-correct, honoring existing display names), resolves a
+    display name for each bare address via the People API, and re-emits the
+    comma-separated list. Addresses that already carry a display name keep it.
+    Unresolved addresses are emitted bare. Returns None when input is empty.
+    """
+    if not header_value or not header_value.strip():
+        return None
+
+    formatted: List[str] = []
+    for existing_name, addr in getaddresses([header_value]):
+        if not addr:
+            continue
+        name = existing_name.strip() if existing_name else None
+        if not name:
+            name = await _lookup_display_name(people_service, addr, cache)
+        formatted.append(format_display_address(name, addr))
+    return ", ".join(formatted) if formatted else None
+
+
+async def _build_web_compose_raw(
+    gmail_service,
+    people_service,
+    *,
+    subject: str,
+    body: str,
+    body_format: Literal["plain", "html"],
+    to: Optional[str],
+    cc: Optional[str],
+    bcc: Optional[str],
+    from_email: str,
+    from_name: Optional[str],
+    thread_id: Optional[str],
+    in_reply_to: Optional[str],
+    references: Optional[str],
+    quote_reply: bool = True,
+    reply_target: Optional[Dict[str, Any]] = None,
+    auto_thread: bool = True,
+) -> str:
+    """Assemble a Gmail-web faithful raw message for the send/draft tools.
+
+    Resolves display names (best-effort), auto-populates reply headers from the
+    thread (when ``auto_thread`` and not pre-supplied), builds both body parts
+    (appending a reply quote when in a thread and ``quote_reply`` is set), and
+    delegates the deterministic MIME assembly to ``_prepare_gmail_message``'s web
+    path. When ``reply_target`` is provided it is used for the quote instead of
+    re-fetching the thread. Never raises for name-resolution or parent-fetch
+    failures.
+    """
+    # Fetch the thread once (with bodies) when replying so a single round-trip
+    # serves both auto-threading and the reply-quote trail.
+    if auto_thread and thread_id and reply_target is None:
+        try:
+            context = await _fetch_thread_reply_context(
+                gmail_service,
+                thread_id,
+                in_reply_to=in_reply_to,
+                include_bodies=quote_reply,
+            )
+        except Exception as e:
+            logger.info("Reply-context fetch failed: %s", e)
+            context = None
+        if context:
+            if not in_reply_to or not references:
+                in_reply_to, references = _derive_reply_headers(
+                    context.get("message_ids", []), in_reply_to, references
+                )
+            reply_target = context.get("target")
+
+    # Resolve display names for the sender and each recipient list.
+    name_cache: Dict[str, Optional[str]] = {}
+    if from_name is None:
+        from_name = await _lookup_display_name(people_service, from_email, name_cache)
+    to_fmt = await _format_address_list_with_names(people_service, to, name_cache)
+    cc_fmt = await _format_address_list_with_names(people_service, cc, name_cache)
+    bcc_fmt = await _format_address_list_with_names(people_service, bcc, name_cache)
+
+    # Build the new-message bodies (typed Gmail-web structure, no fingerprints).
+    if body_format == "html":
+        new_html = (
+            body if body.lstrip().startswith("<div dir=") else new_message_html(body)
+        )
+        new_plain = _html_to_text(body).strip()
+    else:
+        new_plain = body
+        new_html = new_message_html(plain_body_to_html(body))
+
+    # Append the reply quote trail when this is a reply within a thread.
+    if quote_reply:
+        new_plain, new_html = await _build_web_reply_bodies(
+            gmail_service,
+            thread_id,
+            in_reply_to,
+            new_plain,
+            new_html,
+            reply_target=reply_target,
+        )
+
+    raw_message, _thread, _count, _errors = _prepare_gmail_message(
+        subject=subject,
+        body=new_plain,
+        html_body=new_html,
+        to=to_fmt,
+        cc=cc_fmt,
+        bcc=bcc_fmt,
+        thread_id=thread_id,
+        in_reply_to=in_reply_to,
+        references=references,
+        from_email=from_email,
+        from_name=from_name,
+        web_compose=True,
+    )
+    return raw_message
+
+
+async def _build_web_reply_bodies(
+    service,
+    thread_id: Optional[str],
+    in_reply_to: Optional[str],
+    new_plain: str,
+    new_html: str,
+    reply_target: Optional[Dict[str, Any]] = None,
+) -> tuple[str, str]:
+    """Append a Gmail ``gmail_quote`` reply trail to both body parts.
+
+    Uses ``reply_target`` when supplied; otherwise fetches the parent message
+    (its From display name/email, Date, and plain + html bodies). Appends the
+    quote per the Gmail-web spec. If the parent cannot be fetched/lacks required
+    fields, returns the bodies unchanged (send proceeds without a quote rather
+    than failing).
+    """
+    if not thread_id:
+        return new_plain, new_html
+
+    target = reply_target
+    if target is None:
+        try:
+            context = await _fetch_thread_reply_context(
+                service, thread_id, in_reply_to=in_reply_to, include_bodies=True
+            )
+        except Exception as e:
+            logger.info("Reply-quote parent fetch failed; sending without quote: %s", e)
+            return new_plain, new_html
+        target = context.get("target") if context else None
+    if not target:
+        return new_plain, new_html
+
+    parent_from = target.get("from") or ""
+    parent_name, parent_email = parseaddr(parent_from)
+    if not parent_email:
+        return new_plain, new_html
+    parent_name = parent_name.strip() or parent_email
+
+    _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
+    if parent_dt is None:
+        return new_plain, new_html
+
+    parent_text = target.get("text_body") or ""
+    if not parent_text and target.get("html_body"):
+        parent_text = _html_to_text(target["html_body"])
+    parent_html = target.get("html_body") or ""
+    if not parent_html and parent_text:
+        parent_html = "<br>".join(html.escape(line) for line in parent_text.split("\n"))
+
+    attr_plain = format_attribution_plain(parent_name, parent_email, parent_dt)
+    attr_html = format_attribution_html(parent_name, parent_email, parent_dt)
+    quoted_plain = build_quote_plain(parent_text)
+    container = build_quote_container_html(attr_html, parent_html)
+
+    reply_plain = f"{new_plain}\n\n{attr_plain}\n\n{quoted_plain}"
+    reply_html = f"{new_html}<br>{container}"
+    return reply_plain, reply_html
+
+
 def _derive_reply_headers(
     thread_message_ids: List[str],
     in_reply_to: Optional[str],
@@ -1021,6 +1267,57 @@ async def _resolve_url_attachments(
     return resolved
 
 
+def _prepare_gmail_message_web(
+    subject: str,
+    plain_body: str,
+    html_body: str,
+    to: Optional[str] = None,
+    cc: Optional[str] = None,
+    bcc: Optional[str] = None,
+    in_reply_to: Optional[str] = None,
+    references: Optional[str] = None,
+    from_email: Optional[str] = None,
+    from_name: Optional[str] = None,
+    date_header: Optional[str] = None,
+) -> str:
+    """Assemble a Gmail-web faithful multipart/alternative message.
+
+    ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
+    text/html parts (including any reply quote trail) built by the async caller.
+    Returns the base64url-encoded raw message. To/Cc/Bcc are expected
+    pre-formatted; From is formatted here from ``from_email`` + optional
+    ``from_name``.
+    """
+    # Author headers in Gmail's order. Message-ID is intentionally NOT authored
+    # (Gmail assigns it on send/draft).
+    headers: List[tuple[str, str]] = [("MIME-Version", "1.0")]
+    if date_header:
+        headers.append(("Date", date_header))
+    if references:
+        # Fold the References chain with CRLF + TAB per RFC5322 continuation.
+        folded = "\r\n\t".join(references.split())
+        headers.append(("References", folded))
+    if in_reply_to:
+        headers.append(("In-Reply-To", in_reply_to))
+    if bcc:
+        headers.append(("Bcc", bcc))
+    headers.append(("Subject", subject))
+    if from_email:
+        headers.append(("From", format_display_address(from_name, from_email)))
+    if to:
+        headers.append(("To", to))
+    if cc:
+        headers.append(("Cc", cc))
+
+    message = assemble_alternative(
+        headers=headers,
+        plain_text=plain_body,
+        html_text=html_body,
+        boundary=gmail_boundary(),
+    )
+    return encode_raw(message)
+
+
 def _prepare_gmail_message(
     subject: str,
     body: str,
@@ -1034,9 +1331,25 @@ def _prepare_gmail_message(
     from_email: Optional[str] = None,
     from_name: Optional[str] = None,
     attachments: Optional[List[Dict[str, str]]] = None,
+    web_compose: bool = False,
+    html_body: Optional[str] = None,
+    date_header: Optional[str] = None,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
+
+    When ``web_compose`` is True (and no attachments are supplied), the message
+    is assembled to be byte-faithful to a Gmail-web compose: a
+    ``multipart/alternative`` with a Gmail-style boundary, both a text/plain and
+    a text/html part (always), ``charset="UTF-8"`` (uppercase) + quoted-printable
+    on each part, and headers authored in Gmail's order. On this path ``body`` is
+    the fully-assembled text/plain content and ``html_body`` is the
+    fully-assembled text/html content (both built by the async caller, including
+    any ``gmail_quote`` reply trail). ``to``/``cc``/``bcc`` are expected
+    pre-formatted (``Display Name <addr>``); ``from`` is formatted here from
+    ``from_email`` + optional ``from_name``. Attachments are not supported on this
+    path; if any are supplied the function falls back to the standard
+    EmailMessage builder.
 
     Args:
         subject: Email subject
@@ -1065,6 +1378,42 @@ def _prepare_gmail_message(
     normalized_format = body_format.lower()
     if normalized_format not in {"plain", "html"}:
         raise ValueError("body_format must be either 'plain' or 'html'.")
+
+    # Gmail-web faithful path: build multipart/alternative by hand so charset
+    # casing, boundary shape, and part ordering match a real web compose. Only
+    # taken when no attachments are present (the spec targets that case).
+    if web_compose and not attachments:
+        # ``body`` is the assembled text/plain content. ``html_body`` is the
+        # assembled text/html content; when the caller did not supply one, derive
+        # it from ``body`` so the path still yields both parts.
+        if html_body is not None:
+            plain_part = body
+            html_part = html_body
+        elif normalized_format == "html":
+            html_part = (
+                body
+                if body.lstrip().startswith("<div dir=")
+                else new_message_html(body)
+            )
+            plain_part = _html_to_text(body).strip()
+        else:
+            plain_part = body
+            html_part = new_message_html(plain_body_to_html(body))
+
+        raw_message = _prepare_gmail_message_web(
+            subject=reply_subject,
+            plain_body=plain_part,
+            html_body=html_part,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            in_reply_to=in_reply_to,
+            references=references,
+            from_email=from_email,
+            from_name=from_name,
+            date_header=date_header,
+        )
+        return raw_message, thread_id, 0, []
 
     attached_count = 0
     attachment_errors: List[str] = []
@@ -1921,10 +2270,25 @@ async def get_gmail_attachment_content(
     ),
 )
 @handle_http_errors("send_gmail_message", service_type="gmail")
-@require_google_service("gmail", ["gmail_read", GMAIL_SEND_SCOPE])
+@require_multiple_services(
+    [
+        {
+            "service_type": "gmail",
+            "scopes": ["gmail_read", GMAIL_SEND_SCOPE],
+            "param_name": "service",
+        },
+        {
+            "service_type": "people",
+            "scopes": "contacts_read",
+            "param_name": "people_service",
+        },
+    ]
+)
 async def send_gmail_message(
     service,
     user_google_email: str,
+    *,
+    people_service=None,
     to: Annotated[str, Field(description="Recipient email address.")],
     subject: Annotated[
         Optional[str],
@@ -2175,22 +2539,49 @@ async def send_gmail_message(
         )
 
     resolved_attachments = await _resolve_url_attachments(attachments)
-    raw_message, thread_id_final, attached_count, attachment_errors = (
-        _prepare_gmail_message(
-            subject=subject,
+
+    # Without attachments, emit a Gmail-web faithful multipart/alternative with
+    # resolved display names and a real reply quote trail. With attachments, fall
+    # back to the standard builder (the web path targets the no-attachment case).
+    if not resolved_attachments:
+        reply_subject = subject
+        if in_reply_to and not subject.lower().startswith("re:"):
+            reply_subject = f"Re: {subject}"
+        raw_message = await _build_web_compose_raw(
+            service,
+            people_service,
+            subject=reply_subject,
             body=send_body_content,
+            body_format=body_format,
             to=to,
             cc=cc,
             bcc=bcc,
+            from_email=sender_email,
+            from_name=from_name,
             thread_id=thread_id,
             in_reply_to=in_reply_to,
             references=references,
-            body_format=body_format,
-            from_email=sender_email,
-            from_name=from_name,
-            attachments=resolved_attachments if resolved_attachments else None,
         )
-    )
+        thread_id_final = thread_id
+        attached_count = 0
+        attachment_errors = []
+    else:
+        raw_message, thread_id_final, attached_count, attachment_errors = (
+            _prepare_gmail_message(
+                subject=subject,
+                body=send_body_content,
+                to=to,
+                cc=cc,
+                bcc=bcc,
+                thread_id=thread_id,
+                in_reply_to=in_reply_to,
+                references=references,
+                body_format=body_format,
+                from_email=sender_email,
+                from_name=from_name,
+                attachments=resolved_attachments,
+            )
+        )
 
     requested_attachment_count = len(attachments or [])
     if requested_attachment_count > 0 and attached_count == 0:
@@ -2357,10 +2748,25 @@ async def _forward_gmail_message_impl(
     ),
 )
 @handle_http_errors("draft_gmail_message", service_type="gmail")
-@require_google_service("gmail", GMAIL_COMPOSE_SCOPE)
+@require_multiple_services(
+    [
+        {
+            "service_type": "gmail",
+            "scopes": GMAIL_COMPOSE_SCOPE,
+            "param_name": "service",
+        },
+        {
+            "service_type": "people",
+            "scopes": "contacts_read",
+            "param_name": "people_service",
+        },
+    ]
+)
 async def draft_gmail_message(
     service,
     user_google_email: str,
+    *,
+    people_service=None,
     subject: Annotated[str, Field(description="Email subject.")],
     body: Annotated[str, Field(description="Email body (plain text).")],
     body_format: Annotated[
@@ -2559,38 +2965,71 @@ async def draft_gmail_message(
     if thread_id and not subject.strip() and target_reply:
         subject = target_reply.get("subject") or subject
 
-    if quote_original and target_reply:
-        draft_body = _build_quoted_reply_body(
-            draft_body,
-            body_format,
-            signature_html,
-            {
-                "sender": target_reply.get("from") or "unknown",
-                "date": target_reply.get("date", ""),
-                "text_body": target_reply.get("text_body", ""),
-                "html_body": target_reply.get("html_body", ""),
-            },
-        )
-    else:
-        draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
+    # Apply the subject reply-prefix here (the web path expects the final subject).
+    draft_subject = subject
+    if in_reply_to and not subject.lower().startswith("re:"):
+        draft_subject = f"Re: {subject}"
 
     resolved_attachments = await _resolve_url_attachments(attachments)
-    raw_message, _thread_id_final, attached_count, attachment_errors = (
-        _prepare_gmail_message(
-            subject=subject,
+
+    if not resolved_attachments:
+        # Gmail-web faithful path. The body carries the signature; the quote
+        # trail is added by the web helper only when quote_original is set.
+        draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
+        raw_message = await _build_web_compose_raw(
+            service,
+            people_service,
+            subject=draft_subject,
             body=draft_body,
             body_format=body_format,
             to=to,
             cc=cc,
             bcc=bcc,
+            from_email=sender_email,
+            from_name=from_name,
             thread_id=thread_id,
             in_reply_to=in_reply_to,
             references=references,
-            from_email=sender_email,
-            from_name=from_name,
-            attachments=resolved_attachments,
+            quote_reply=quote_original,
+            reply_target=target_reply,
+            auto_thread=False,
         )
-    )
+        attached_count = 0
+        attachment_errors = []
+    else:
+        if quote_original and target_reply:
+            draft_body = _build_quoted_reply_body(
+                draft_body,
+                body_format,
+                signature_html,
+                {
+                    "sender": target_reply.get("from") or "unknown",
+                    "date": target_reply.get("date", ""),
+                    "text_body": target_reply.get("text_body", ""),
+                    "html_body": target_reply.get("html_body", ""),
+                },
+            )
+        else:
+            draft_body = _append_signature_to_body(
+                draft_body, body_format, signature_html
+            )
+
+        raw_message, _thread_id_final, attached_count, attachment_errors = (
+            _prepare_gmail_message(
+                subject=subject,
+                body=draft_body,
+                body_format=body_format,
+                to=to,
+                cc=cc,
+                bcc=bcc,
+                thread_id=thread_id,
+                in_reply_to=in_reply_to,
+                references=references,
+                from_email=sender_email,
+                from_name=from_name,
+                attachments=resolved_attachments,
+            )
+        )
 
     requested_attachment_count = len(attachments or [])
     if requested_attachment_count > 0 and attached_count == 0:
