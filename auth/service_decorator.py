@@ -951,12 +951,26 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
                             stack.callback(service.close)
                             services_created = True
 
-                        except GoogleAuthenticationError as e:
-                            logger.error(
-                                f"[{tool_name}] Auth failed for {user_google_email} | "
-                                f"{service_name}/{service_version} | "
-                                f"method={auth_method or 'none'} | {e}"
-                            )
+                        except Exception as e:
+                            # Optional services degrade gracefully: a missing scope
+                            # (or any auth failure) injects None instead of failing the
+                            # whole tool, so the primary action still runs. The tool is
+                            # expected to detect None and report the fallback.
+                            if config.get("optional", False):
+                                logger.info(
+                                    f"[{tool_name}] Optional service '{service_type}' "
+                                    f"unavailable for {user_google_email} "
+                                    f"({service_name}/{service_version}): {e}. "
+                                    "Injecting None; tool will degrade gracefully."
+                                )
+                                kwargs[param_name] = None
+                                continue
+                            if isinstance(e, GoogleAuthenticationError):
+                                logger.error(
+                                    f"[{tool_name}] Auth failed for {user_google_email} | "
+                                    f"{service_name}/{service_version} | "
+                                    f"method={auth_method or 'none'} | {e}"
+                                )
                             # Re-raise the original error without wrapping it
                             raise
 

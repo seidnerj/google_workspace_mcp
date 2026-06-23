@@ -53,6 +53,9 @@ from auth.scopes import (
     GMAIL_COMPOSE_SCOPE,
     GMAIL_MODIFY_SCOPE,
     GMAIL_LABELS_SCOPE,
+    CONTACTS_READONLY_SCOPE,
+    CONTACTS_OTHER_READONLY_SCOPE,
+    DIRECTORY_READONLY_SCOPE,
 )
 from gmail.gmail_helpers import (
     GMAIL_METADATA_HEADERS,
@@ -510,12 +513,13 @@ def _build_quoted_reply_body(
     return f"{reply_body}{sig_block}\n\n{attribution}\n{quoted_lines}"
 
 
-async def _get_send_as_signature_html(service, from_email: Optional[str] = None) -> str:
-    """
-    Fetch signature HTML from Gmail send-as settings.
+async def _get_send_as_entries(service) -> List[Dict[str, Any]]:
+    """Fetch Gmail send-as entries.
 
-    Returns empty string when the account has no signature configured or when
-    auth/scope errors mean the settings endpoint is unavailable.
+    Returns [] when the settings endpoint is unavailable due to a benign
+    auth/scope error; raises a tool error for non-benign failures. Each entry
+    carries both the configured ``signature`` and the ``displayName`` Gmail web
+    renders in the From line.
     """
     try:
         response = await asyncio.to_thread(
@@ -524,37 +528,35 @@ async def _get_send_as_signature_html(service, from_email: Optional[str] = None)
     except HttpError as e:
         if _is_benign_signature_http_error(e):
             logger.info(
-                "Skipping Gmail signature fetch: missing auth/scope for settings endpoint."
+                "Skipping Gmail send-as fetch: missing auth/scope for settings endpoint."
             )
-            return ""
-        logger.error(f"Failed to fetch Gmail send-as signatures: {e}", exc_info=True)
+            return []
+        logger.error(f"Failed to fetch Gmail send-as settings: {e}", exc_info=True)
         raise _signature_fetch_tool_error(e) from e
     except Exception as e:
-        logger.error(f"Failed to fetch Gmail send-as signatures: {e}", exc_info=True)
+        logger.error(f"Failed to fetch Gmail send-as settings: {e}", exc_info=True)
         raise _signature_fetch_tool_error(e) from e
 
-    send_as_entries = response.get("sendAs", [])
-    if not send_as_entries:
-        return ""
+    if not isinstance(response, dict):
+        return []
+    return response.get("sendAs", [])
 
+
+def _match_send_as_entry(
+    entries: List[Dict[str, Any]], from_email: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Pick the send-as entry for ``from_email`` (exact match > primary > first)."""
+    if not entries:
+        return None
     if from_email:
         from_email_normalized = from_email.strip().lower()
-        for entry in send_as_entries:
+        for entry in entries:
             if entry.get("sendAsEmail", "").strip().lower() == from_email_normalized:
-                return entry.get("signature", "") or ""
-
-    for entry in send_as_entries:
+                return entry
+    for entry in entries:
         if entry.get("isPrimary"):
-            return entry.get("signature", "") or ""
-
-    return send_as_entries[0].get("signature", "") or ""
-
-
-async def _get_send_as_signature_html_for_tool(
-    service, from_email: Optional[str] = None
-) -> str:
-    """Fetch signature HTML and convert non-benign failures to tool errors."""
-    return await _get_send_as_signature_html(service, from_email=from_email)
+            return entry
+    return entries[0]
 
 
 def _format_attachment_result(attached_count: int, requested_count: int) -> str:
@@ -706,48 +708,205 @@ def _parse_message_id_chain(header_value: Optional[str]) -> List[str]:
 # People API readMask for name lookups: names + the emails to match against.
 _PEOPLE_NAME_READ_MASK = "names,emailAddresses"
 
+# Human-readable labels for the name-resolution scopes, used in the fallback note.
+_NAME_SCOPE_LABELS = {
+    CONTACTS_READONLY_SCOPE: "contacts.readonly (your saved contacts)",
+    CONTACTS_OTHER_READONLY_SCOPE: (
+        "contacts.other.readonly (auto-collected 'Other contacts')"
+    ),
+    DIRECTORY_READONLY_SCOPE: "directory.readonly (your Workspace directory)",
+}
+
+
+def _harvest_thread_display_names(messages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Map ``email -> display name`` from every thread participant's headers.
+
+    Mirrors Gmail's reply behavior: when you reply without editing recipients,
+    the names written into To/Cc come from the conversation's own
+    From/Reply-To/To/Cc headers (sender-supplied). First non-empty name seen per
+    address wins.
+    """
+    names: Dict[str, str] = {}
+    for msg in messages or []:
+        for field in ("from", "reply_to", "to", "cc"):
+            for existing_name, addr in getaddresses([msg.get(field) or ""]):
+                if not addr:
+                    continue
+                key = addr.strip().lower()
+                candidate = (existing_name or "").strip()
+                if candidate and key not in names:
+                    names[key] = candidate
+    return names
+
+
+def _match_person_name(persons: List[Dict[str, Any]], key: str) -> Optional[str]:
+    """Return the displayName of the person whose emails include ``key``."""
+    for person in persons:
+        emails = [
+            (e.get("value") or "").strip().lower()
+            for e in person.get("emailAddresses", [])
+        ]
+        if key in emails:
+            names = person.get("names", [])
+            if names:
+                candidate = (names[0].get("displayName") or "").strip()
+                if candidate:
+                    return candidate
+            return None
+    return None
+
+
+async def _people_search_tier(
+    request_factory,
+    params: Dict[str, Any],
+    key: str,
+    *,
+    results_key: str,
+    wrap_key: Optional[str],
+    scope: str,
+    missing_scopes: Optional[set],
+) -> Optional[str]:
+    """Run one People search tier and extract a matching display name.
+
+    Best-effort: a 403 (scope not granted) records ``scope`` in ``missing_scopes``
+    and returns None; any other failure is logged and returns None. ``wrap_key``
+    is the per-result wrapper field (``person`` for searchContacts/otherContacts,
+    None for searchDirectoryPeople where results are person objects directly).
+    """
+    try:
+        result = await asyncio.to_thread(request_factory(**params).execute)
+    except HttpError as e:
+        status = getattr(getattr(e, "resp", None), "status", None)
+        if status in (401, 403):
+            if missing_scopes is not None:
+                missing_scopes.add(scope)
+        else:
+            logger.info("People name lookup tier failed: %s", e)
+        return None
+    except Exception as e:
+        logger.info("People name lookup tier failed: %s", e)
+        return None
+
+    if not isinstance(result, dict):
+        return None
+    items = result.get(results_key, []) or []
+    persons = [
+        (item.get(wrap_key, {}) if wrap_key else item)
+        for item in items
+        if isinstance(item, dict)
+    ]
+    return _match_person_name(persons, key)
+
+
+async def _people_contacts_tier(
+    people_service, email: str, key: str, missing_scopes: Optional[set]
+) -> Optional[str]:
+    """Saved-contacts lookup (highest People tier; Gmail's documented winner)."""
+    return await _people_search_tier(
+        people_service.people().searchContacts,
+        {"query": email, "readMask": _PEOPLE_NAME_READ_MASK},
+        key,
+        results_key="results",
+        wrap_key="person",
+        scope=CONTACTS_READONLY_SCOPE,
+        missing_scopes=missing_scopes,
+    )
+
+
+async def _people_other_directory_tiers(
+    people_service, email: str, key: str, missing_scopes: Optional[set]
+) -> Optional[str]:
+    """Auto-collected 'Other contacts' then Workspace directory, in that order.
+
+    Used for addresses not in saved contacts and not in the conversation (a
+    typed/added recipient -- Scenario 2). Each tier is best-effort; first hit wins.
+    """
+    name = await _people_search_tier(
+        people_service.otherContacts().search,
+        {"query": email, "readMask": _PEOPLE_NAME_READ_MASK},
+        key,
+        results_key="results",
+        wrap_key="person",
+        scope=CONTACTS_OTHER_READONLY_SCOPE,
+        missing_scopes=missing_scopes,
+    )
+    if name:
+        return name
+    return await _people_search_tier(
+        people_service.people().searchDirectoryPeople,
+        {
+            "query": email,
+            "readMask": _PEOPLE_NAME_READ_MASK,
+            "sources": [
+                "DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE",
+                "DIRECTORY_SOURCE_TYPE_DOMAIN_CONTACT",
+            ],
+        },
+        key,
+        results_key="people",
+        wrap_key=None,
+        scope=DIRECTORY_READONLY_SCOPE,
+        missing_scopes=missing_scopes,
+    )
+
+
+async def _warmup_people_cache(people_service) -> None:
+    """Issue empty-query searches so the first real lookup hits a warm cache.
+
+    Google recommends a warmup request before searchContacts/otherContacts.search
+    (a freshly authorized token has a cold people index). Fully best-effort.
+    """
+    for request_factory in (
+        people_service.people().searchContacts,
+        people_service.otherContacts().search,
+    ):
+        try:
+            await asyncio.to_thread(
+                request_factory(query="", readMask=_PEOPLE_NAME_READ_MASK).execute
+            )
+        except Exception:
+            pass
+
 
 async def _lookup_display_name(
     people_service,
     email: str,
     cache: Dict[str, Optional[str]],
+    thread_names: Optional[Dict[str, str]] = None,
+    missing_scopes: Optional[set] = None,
 ) -> Optional[str]:
-    """Best-effort People API lookup of a display name for ``email``.
+    """Resolve a display name for ``email`` the way Gmail does, best-effort.
 
-    Returns the display name, or None when no contact matches or the lookup
-    fails for any reason (graceful degradation -- the send must never fail
-    because a name could not be resolved). Results are memoized in ``cache``.
+    Priority (highest first), per Google's documented compose/reply behavior:
+      1. Saved Contacts (People ``searchContacts``) -- Gmail re-resolves the chip
+         against your contacts at compose AND reply time, so a saved name wins
+         even over the thread's sender-supplied name (subject to a ~24h lag).
+      2. Thread-participant header name (``thread_names``) -- the sender-supplied
+         name seeded into the reply chip for an address NOT in your contacts
+         (covers replies to non-contacts like an external counterpart, no scope).
+      3. People index for still-unresolved addresses (Scenario 2: typed/added):
+         Other contacts -> Workspace directory.
+      4. None -> caller emits the bare address.
+
+    Never raises: any People failure (missing scope, network) degrades to the
+    next tier or bare address. Results are memoized in ``cache``.
     """
     key = email.strip().lower()
     if key in cache:
         return cache[key]
 
     name: Optional[str] = None
+    # 1. Saved contacts win (Google's documented compose/reply resolution).
     if people_service is not None and key:
-        try:
-            result = await asyncio.to_thread(
-                people_service.people()
-                .searchContacts(query=email, readMask=_PEOPLE_NAME_READ_MASK)
-                .execute
-            )
-            for item in result.get("results", []):
-                person = item.get("person", {})
-                emails = [
-                    (e.get("value") or "").strip().lower()
-                    for e in person.get("emailAddresses", [])
-                ]
-                if key in emails:
-                    names = person.get("names", [])
-                    if names:
-                        candidate = names[0].get("displayName") or ""
-                        if candidate.strip():
-                            name = candidate.strip()
-                    break
-        except Exception as e:
-            logger.info(
-                "People name lookup failed for an address; using bare address: %s", e
-            )
-            name = None
+        name = await _people_contacts_tier(people_service, email, key, missing_scopes)
+    # 2. Thread/sender-supplied name for non-contacts in the conversation.
+    if not name and thread_names and key in thread_names:
+        name = thread_names[key]
+    # 3. Other contacts then directory for typed/added addresses.
+    if not name and people_service is not None and key:
+        name = await _people_other_directory_tiers(
+            people_service, email, key, missing_scopes
+        )
 
     cache[key] = name
     return name
@@ -757,13 +916,16 @@ async def _format_address_list_with_names(
     people_service,
     header_value: Optional[str],
     cache: Dict[str, Optional[str]],
+    thread_names: Optional[Dict[str, str]] = None,
+    missing_scopes: Optional[set] = None,
 ) -> Optional[str]:
     """Format a To/Cc/Bcc header value as ``Display Name <addr>`` per address.
 
     Parses the header (RFC-correct, honoring existing display names), resolves a
-    display name for each bare address via the People API, and re-emits the
-    comma-separated list. Addresses that already carry a display name keep it.
-    Unresolved addresses are emitted bare. Returns None when input is empty.
+    display name for each bare address (thread name, then people index), and
+    re-emits the comma-separated list. Addresses that already carry a display
+    name keep it. Unresolved addresses are emitted bare. Returns None when input
+    is empty.
     """
     if not header_value or not header_value.strip():
         return None
@@ -774,9 +936,41 @@ async def _format_address_list_with_names(
             continue
         name = existing_name.strip() if existing_name else None
         if not name:
-            name = await _lookup_display_name(people_service, addr, cache)
+            name = await _lookup_display_name(
+                people_service,
+                addr,
+                cache,
+                thread_names=thread_names,
+                missing_scopes=missing_scopes,
+            )
         formatted.append(format_display_address(name, addr))
     return ", ".join(formatted) if formatted else None
+
+
+def _build_name_fallback_note(
+    people_service_absent: bool, missing_scopes: Optional[set]
+) -> str:
+    """Build the result note when recipient names couldn't be resolved.
+
+    Lists exactly the scopes that would have helped (all three when the People
+    service is entirely absent; otherwise the specific tiers that returned a
+    scope error), and how to grant them. Returns "" when nothing is actionable.
+    """
+    if people_service_absent:
+        scopes = set(_NAME_SCOPE_LABELS)
+    else:
+        scopes = set(missing_scopes or set())
+    if not scopes:
+        return ""
+    listed = "; ".join(
+        label for scope, label in _NAME_SCOPE_LABELS.items() if scope in scopes
+    )
+    return (
+        "\n\n[Heads up] Some recipient display names could not be resolved, so "
+        "those addresses were sent as bare emails. For Gmail-web-style names, "
+        f"grant: {listed}. Enable the 'contacts' tool (it requests these scopes) "
+        "and re-authenticate by running start_google_auth for this account."
+    )
 
 
 async def _build_web_compose_raw(
@@ -797,16 +991,23 @@ async def _build_web_compose_raw(
     quote_reply: bool = True,
     reply_target: Optional[Dict[str, Any]] = None,
     auto_thread: bool = True,
-) -> str:
+    thread_names: Optional[Dict[str, str]] = None,
+) -> tuple[str, bool, set]:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
+
+    Returns ``(raw_message, had_unresolved, missing_scopes)``. ``had_unresolved``
+    is True when at least one looked-up recipient yielded no display name;
+    ``missing_scopes`` holds the name-resolution scopes that returned a scope
+    error. Together they drive the caller's scope-fallback note.
 
     Resolves display names (best-effort), auto-populates reply headers from the
     thread (when ``auto_thread`` and not pre-supplied), builds both body parts
     (appending a reply quote when in a thread and ``quote_reply`` is set), and
     delegates the deterministic MIME assembly to ``_prepare_gmail_message``'s web
     path. When ``reply_target`` is provided it is used for the quote instead of
-    re-fetching the thread. Never raises for name-resolution or parent-fetch
-    failures.
+    re-fetching the thread. ``thread_names`` supplies sender-supplied display
+    names harvested from the conversation (used when the caller already fetched
+    the thread). Never raises for name-resolution or parent-fetch failures.
     """
     # Fetch the thread once (with bodies) when replying so a single round-trip
     # serves both auto-threading and the reply-quote trail.
@@ -827,14 +1028,36 @@ async def _build_web_compose_raw(
                     context.get("message_ids", []), in_reply_to, references
                 )
             reply_target = context.get("target")
+            # Harvest participant names so reply recipients resolve like Gmail's
+            # (sender-supplied names) even without any People scope.
+            if thread_names is None:
+                thread_names = _harvest_thread_display_names(context.get("messages", []))
 
-    # Resolve display names for the sender and each recipient list.
+    # Resolve display names for the sender and each recipient list. Thread names
+    # cover reply recipients (Scenario 1); the People index covers typed/added
+    # addresses (Scenario 2). missing_scopes collects tiers that returned a scope
+    # error so the caller can name them in the fallback note.
     name_cache: Dict[str, Optional[str]] = {}
+    missing_scopes: set = set()
+    if people_service is not None:
+        await _warmup_people_cache(people_service)
     if from_name is None:
-        from_name = await _lookup_display_name(people_service, from_email, name_cache)
-    to_fmt = await _format_address_list_with_names(people_service, to, name_cache)
-    cc_fmt = await _format_address_list_with_names(people_service, cc, name_cache)
-    bcc_fmt = await _format_address_list_with_names(people_service, bcc, name_cache)
+        from_name = await _lookup_display_name(
+            people_service,
+            from_email,
+            name_cache,
+            thread_names=thread_names,
+            missing_scopes=missing_scopes,
+        )
+    to_fmt = await _format_address_list_with_names(
+        people_service, to, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+    )
+    cc_fmt = await _format_address_list_with_names(
+        people_service, cc, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+    )
+    bcc_fmt = await _format_address_list_with_names(
+        people_service, bcc, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+    )
 
     # Build the new-message bodies (typed Gmail-web structure, no fingerprints).
     if body_format == "html":
@@ -871,7 +1094,15 @@ async def _build_web_compose_raw(
         from_name=from_name,
         web_compose=True,
     )
-    return raw_message
+    # A RECIPIENT is "unresolved" if we looked it up (no inline name) and got
+    # nothing from contacts or the thread -- the signal for the contacts-scope
+    # fallback note. The sender's own name is excluded: it comes from Send-As,
+    # not contacts, so its absence must not trigger a contacts-scope note.
+    sender_key = from_email.strip().lower()
+    had_unresolved = any(
+        value is None for key, value in name_cache.items() if key != sender_key
+    )
+    return raw_message, had_unresolved, missing_scopes
 
 
 async def _build_web_reply_bodies(
@@ -2281,6 +2512,9 @@ async def get_gmail_attachment_content(
             "service_type": "people",
             "scopes": "contacts_read",
             "param_name": "people_service",
+            # Optional: a missing contacts scope degrades to bare-address sends
+            # (pre-feature behavior) with a note in the result, never a hard failure.
+            "optional": True,
         },
     ]
 )
@@ -2527,16 +2761,24 @@ async def send_gmail_message(
     # Use from_email (Send As alias) if provided, otherwise default to authenticated user
     sender_email = from_email or user_google_email
 
-    # Optionally append the Gmail signature from send-as settings, mirroring
-    # draft_gmail_message so sent mail respects the user's Settings > Signature.
+    # When signing, fetch send-as settings once: the entry carries both the
+    # signature and the displayName Gmail web renders in the From line (the
+    # sender's own name is not in contacts, so Send-As -- not People -- is the
+    # right source). When signatures are disabled we must not touch the settings
+    # endpoint at all (avoids requiring gmail.settings.basic); the From name then
+    # falls back to thread/People resolution.
     send_body_content = body
     if include_signature:
-        signature_html = await _get_send_as_signature_html_for_tool(
-            service, from_email=sender_email
+        send_as_entry = _match_send_as_entry(
+            await _get_send_as_entries(service), sender_email
         )
-        send_body_content = _append_signature_to_body(
-            send_body_content, body_format, signature_html
-        )
+        if from_name is None and send_as_entry:
+            from_name = (send_as_entry.get("displayName") or "").strip() or None
+        if send_as_entry:
+            signature_html = send_as_entry.get("signature", "") or ""
+            send_body_content = _append_signature_to_body(
+                send_body_content, body_format, signature_html
+            )
 
     resolved_attachments = await _resolve_url_attachments(attachments)
 
@@ -2547,7 +2789,7 @@ async def send_gmail_message(
         reply_subject = subject
         if in_reply_to and not subject.lower().startswith("re:"):
             reply_subject = f"Re: {subject}"
-        raw_message = await _build_web_compose_raw(
+        raw_message, had_unresolved, missing_scopes = await _build_web_compose_raw(
             service,
             people_service,
             subject=reply_subject,
@@ -2565,7 +2807,15 @@ async def send_gmail_message(
         thread_id_final = thread_id
         attached_count = 0
         attachment_errors = []
+        # Note only when a recipient actually went unresolved AND more scope would
+        # help (no People service at all, or a tier returned a scope error).
+        name_note = (
+            _build_name_fallback_note(people_service is None, missing_scopes)
+            if had_unresolved
+            else ""
+        )
     else:
+        name_note = ""
         raw_message, thread_id_final, attached_count, attachment_errors = (
             _prepare_gmail_message(
                 subject=subject,
@@ -2610,8 +2860,8 @@ async def send_gmail_message(
         attachment_info = _format_attachment_result(
             attached_count, requested_attachment_count
         )
-        return f"Email sent{attachment_info}! Message ID: {message_id}"
-    return f"Email sent! Message ID: {message_id}"
+        return f"Email sent{attachment_info}! Message ID: {message_id}{name_note}"
+    return f"Email sent! Message ID: {message_id}{name_note}"
 
 
 # Internal implementation function for testing
@@ -2759,6 +3009,9 @@ async def _forward_gmail_message_impl(
             "service_type": "people",
             "scopes": "contacts_read",
             "param_name": "people_service",
+            # Optional: a missing contacts scope degrades to bare-address sends
+            # (pre-feature behavior) with a note in the result, never a hard failure.
+            "optional": True,
         },
     ]
 )
@@ -2935,12 +3188,19 @@ async def draft_gmail_message(
     # Prepare the email message
     # Use from_email (Send As alias) if provided, otherwise default to authenticated user
     sender_email = from_email or user_google_email
+    # Only touch the settings endpoint when signing (avoids requiring
+    # gmail.settings.basic when disabled). The send-as entry carries both the
+    # signature and the Gmail-web From displayName.
     draft_body = body
     signature_html = ""
     if include_signature:
-        signature_html = await _get_send_as_signature_html_for_tool(
-            service, from_email=sender_email
+        send_as_entry = _match_send_as_entry(
+            await _get_send_as_entries(service), sender_email
         )
+        if from_name is None and send_as_entry:
+            from_name = (send_as_entry.get("displayName") or "").strip() or None
+        if send_as_entry:
+            signature_html = send_as_entry.get("signature", "") or ""
 
     reply_context = None
     if thread_id and (quote_original or not in_reply_to or not references or not to):
@@ -2960,6 +3220,13 @@ async def draft_gmail_message(
         )
 
     target_reply = reply_context.get("target") if reply_context else None
+    # Harvest sender-supplied names from the conversation so reply recipients
+    # resolve like Gmail's, even with no People scope (Scenario 1).
+    draft_thread_names = (
+        _harvest_thread_display_names(reply_context.get("messages", []))
+        if reply_context
+        else None
+    )
     if thread_id and not to and target_reply:
         to = target_reply.get("reply_to") or target_reply.get("from") or to
     if thread_id and not subject.strip() and target_reply:
@@ -2976,7 +3243,7 @@ async def draft_gmail_message(
         # Gmail-web faithful path. The body carries the signature; the quote
         # trail is added by the web helper only when quote_original is set.
         draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
-        raw_message = await _build_web_compose_raw(
+        raw_message, had_unresolved, missing_scopes = await _build_web_compose_raw(
             service,
             people_service,
             subject=draft_subject,
@@ -2993,10 +3260,17 @@ async def draft_gmail_message(
             quote_reply=quote_original,
             reply_target=target_reply,
             auto_thread=False,
+            thread_names=draft_thread_names,
         )
         attached_count = 0
         attachment_errors = []
+        name_note = (
+            _build_name_fallback_note(people_service is None, missing_scopes)
+            if had_unresolved
+            else ""
+        )
     else:
+        name_note = ""
         if quote_original and target_reply:
             draft_body = _build_quoted_reply_body(
                 draft_body,
@@ -3054,7 +3328,7 @@ async def draft_gmail_message(
     attachment_info = _format_attachment_result(
         attached_count, requested_attachment_count
     )
-    return f"Draft created{attachment_info}! Draft ID: {draft_id}"
+    return f"Draft created{attachment_info}! Draft ID: {draft_id}{name_note}"
 
 
 def _format_thread_content(
