@@ -21,22 +21,16 @@ from auth import oauth_callback_server
 def test_callback_port_is_pinned_reflects_launch_snapshot(monkeypatch):
     # The pinned signal is captured from the launch environment at import time,
     # immune to later WORKSPACE_MCP_PORT mutation by the ephemeral path.
-    monkeypatch.setattr(
-        oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", True
-    )
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", True)
     assert oauth_callback_server._callback_port_is_pinned() is True
 
-    monkeypatch.setattr(
-        oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False
-    )
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False)
     assert oauth_callback_server._callback_port_is_pinned() is False
 
 
 def test_callback_port_pin_snapshot_ignores_later_env_mutation(monkeypatch):
     # Simulate the ephemeral path setting WORKSPACE_MCP_PORT after launch.
-    monkeypatch.setattr(
-        oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False
-    )
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False)
     monkeypatch.setenv("WORKSPACE_MCP_PORT", "54321")
     assert oauth_callback_server._callback_port_is_pinned() is False
 
@@ -60,9 +54,7 @@ def test_acquire_ephemeral_port_returns_bound_free_socket():
 
 def test_ensure_stdio_unpinned_acquires_ephemeral_port(monkeypatch):
     monkeypatch.setattr(oauth_callback_server, "get_transport_mode", lambda: "stdio")
-    monkeypatch.setattr(
-        oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False
-    )
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False)
     monkeypatch.delenv("WORKSPACE_MCP_PORT", raising=False)
     monkeypatch.delenv("PORT", raising=False)
     monkeypatch.delenv("WORKSPACE_MCP_RESOLVED_PORT", raising=False)
@@ -106,9 +98,7 @@ def test_ensure_stdio_unpinned_acquires_ephemeral_port(monkeypatch):
 
 def test_ensure_stdio_pinned_keeps_fixed_port(monkeypatch):
     monkeypatch.setattr(oauth_callback_server, "get_transport_mode", lambda: "stdio")
-    monkeypatch.setattr(
-        oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", True
-    )
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", True)
     monkeypatch.setattr(
         oauth_callback_server,
         "get_oauth_config",

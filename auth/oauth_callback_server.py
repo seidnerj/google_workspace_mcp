@@ -136,9 +136,7 @@ class MinimalOAuthServer:
         error = request.query_params.get("error")
 
         if error:
-            error_message = (
-                f"Authentication failed: Google returned an error: {error}."
-            )
+            error_message = f"Authentication failed: Google returned an error: {error}."
             logger.error(error_message)
             return create_error_response(error_message)
 
@@ -466,6 +464,9 @@ class MinimalOAuthServer:
 # Global instance for stdio mode
 _minimal_oauth_server: Optional[MinimalOAuthServer] = None
 _minimal_oauth_server_lock = threading.Lock()
+# Serializes the ephemeral acquire-port → publish-env → reload-config → start
+# handoff, which mutates process-global state and must not interleave.
+_stdio_ephemeral_callback_lock = threading.Lock()
 
 
 def ensure_oauth_callback_available(
@@ -516,6 +517,13 @@ def ensure_oauth_callback_available(
                     base_uri,
                     port,
                 )
+                _minimal_oauth_server.stop()
+                _minimal_oauth_server = None
+
+            # Ephemeral flows hand in a fresh prebound socket each time. Never
+            # reuse a prior instance even if the OS reassigns the same port —
+            # its socket/shutdown state is stale and the new socket would leak.
+            if ephemeral and _minimal_oauth_server is not None:
                 _minimal_oauth_server.stop()
                 _minimal_oauth_server = None
 
@@ -599,29 +607,34 @@ def ensure_stdio_oauth_callback_available() -> tuple[bool, str]:
 
     # Ephemeral path: bind a free port now and publish it so the redirect URI
     # (composed by the caller right after this returns) and the callback listener
-    # agree on the same port.
-    host = urlparse(get_oauth_config().base_uri).hostname or "localhost"
-    try:
-        sock, port = _acquire_ephemeral_port(host)
-    except OSError as exc:
-        return False, f"Could not acquire an ephemeral OAuth callback port: {exc}"
+    # agree on the same port. The whole acquire→publish→reload→start handoff is
+    # serialized so concurrent callers can't pair one socket with another's port.
+    with _stdio_ephemeral_callback_lock:
+        host = urlparse(get_oauth_config().base_uri).hostname or "localhost"
+        try:
+            sock, port = _acquire_ephemeral_port(host)
+        except OSError as exc:
+            return False, f"Could not acquire an ephemeral OAuth callback port: {exc}"
 
-    os.environ["WORKSPACE_MCP_PORT"] = str(port)
-    os.environ["WORKSPACE_MCP_RESOLVED_PORT"] = "1"
-    reload_oauth_config()
-    config = get_oauth_config()
-    try:
-        return ensure_oauth_callback_available(
-            "stdio",
-            config.port,
-            config.base_uri,
-            prebound_socket=sock,
-            ephemeral=True,
-            idle_timeout=EPHEMERAL_CALLBACK_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        sock.close()
-        raise
+        os.environ["WORKSPACE_MCP_PORT"] = str(port)
+        os.environ["WORKSPACE_MCP_RESOLVED_PORT"] = "1"
+        reload_oauth_config()
+        config = get_oauth_config()
+        try:
+            success, error = ensure_oauth_callback_available(
+                "stdio",
+                config.port,
+                config.base_uri,
+                prebound_socket=sock,
+                ephemeral=True,
+                idle_timeout=EPHEMERAL_CALLBACK_TIMEOUT_SECONDS,
+            )
+            if not success:
+                sock.close()
+            return success, error
+        except Exception:
+            sock.close()
+            raise
 
 
 def cleanup_oauth_callback_server():
