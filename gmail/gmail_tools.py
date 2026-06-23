@@ -1031,7 +1031,9 @@ async def _build_web_compose_raw(
             # Harvest participant names so reply recipients resolve like Gmail's
             # (sender-supplied names) even without any People scope.
             if thread_names is None:
-                thread_names = _harvest_thread_display_names(context.get("messages", []))
+                thread_names = _harvest_thread_display_names(
+                    context.get("messages", [])
+                )
 
     # Resolve display names for the sender and each recipient list. Thread names
     # cover reply recipients (Scenario 1); the People index covers typed/added
@@ -1050,13 +1052,25 @@ async def _build_web_compose_raw(
             missing_scopes=missing_scopes,
         )
     to_fmt = await _format_address_list_with_names(
-        people_service, to, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+        people_service,
+        to,
+        name_cache,
+        thread_names=thread_names,
+        missing_scopes=missing_scopes,
     )
     cc_fmt = await _format_address_list_with_names(
-        people_service, cc, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+        people_service,
+        cc,
+        name_cache,
+        thread_names=thread_names,
+        missing_scopes=missing_scopes,
     )
     bcc_fmt = await _format_address_list_with_names(
-        people_service, bcc, name_cache, thread_names=thread_names, missing_scopes=missing_scopes
+        people_service,
+        bcc,
+        name_cache,
+        thread_names=thread_names,
+        missing_scopes=missing_scopes,
     )
 
     # Build the new-message bodies (typed Gmail-web structure, no fingerprints).
