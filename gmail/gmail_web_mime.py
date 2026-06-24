@@ -515,6 +515,11 @@ def assemble_web_message(
     has_inline = bool(inline_parts)
     has_attach = bool(attachment_parts)
 
+    if has_inline and boundary_related is None:
+        raise ValueError("boundary_related is required when inline_parts is provided")
+    if has_attach and boundary_mixed is None:
+        raise ValueError("boundary_mixed is required when attachment_parts is provided")
+
     def _head(content_type: str) -> str:
         lines: List[str] = [f"{name}: {value}" for name, value in headers]
         lines.append(f"Content-Type: {content_type}")

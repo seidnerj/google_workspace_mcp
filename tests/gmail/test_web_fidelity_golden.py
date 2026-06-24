@@ -899,3 +899,137 @@ def test_assemble_mixed_base64_multiline():
         "base64 block must not end with a blank line before the next boundary"
     )
     assert lines[-1] != "", "Last base64 line before boundary must not be empty"
+
+
+# ---------------------------------------------------------------------------
+# Guard tests for assemble_web_message boundary validation
+# ---------------------------------------------------------------------------
+
+
+def test_web_message_missing_boundary_related_raises():
+    """assemble_web_message with inline_parts but no boundary_related raises ValueError."""
+    import pytest
+
+    from gmail.gmail_web_mime import assemble_web_message
+
+    with pytest.raises(ValueError, match="boundary_related is required"):
+        assemble_web_message(
+            [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Test")],
+            "plain",
+            "<div>html</div>",
+            inline_parts=[
+                {
+                    "filename": "img.jpg",
+                    "mime_type": "image/jpeg",
+                    "data": _JPEG_DATA,
+                    "content_id": "img@example.com",
+                }
+            ],
+            attachment_parts=None,
+            boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+            boundary_related=None,
+        )
+
+
+def test_web_message_missing_boundary_mixed_raises():
+    """assemble_web_message with attachment_parts but no boundary_mixed raises ValueError."""
+    import pytest
+
+    from gmail.gmail_web_mime import assemble_web_message
+
+    with pytest.raises(ValueError, match="boundary_mixed is required"):
+        assemble_web_message(
+            [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Test")],
+            "plain",
+            "<div>html</div>",
+            inline_parts=None,
+            attachment_parts=[
+                {
+                    "filename": "doc.pdf",
+                    "mime_type": "application/pdf",
+                    "data": _PDF_DATA,
+                }
+            ],
+            boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+            boundary_mixed=None,
+        )
+
+
+def test_web_message_multiple_inline_parts():
+    """Multiple inline parts produce a multipart/related with all inlines preserved."""
+    from gmail.gmail_web_mime import assemble_web_message
+    from tools.golden_skeleton import extract_skeleton
+
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Multi")]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "img1.jpg",
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": "img1@example.com",
+            },
+            {
+                "filename": "img2.png",
+                "mime_type": "image/png",
+                "data": _PNG_INLINE,
+                "content_id": "img2@example.com",
+            },
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/related"
+    # Should have 3 parts: alternative + 2 inlines
+    assert len(top["parts"]) == 3
+    assert top["parts"][0]["content_type"] == "multipart/alternative"
+    assert top["parts"][1]["content_type"] == "image/jpeg"
+    assert top["parts"][1]["disposition"] == "inline"
+    assert top["parts"][2]["content_type"] == "image/png"
+    assert top["parts"][2]["disposition"] == "inline"
+    # Verify content-id presence
+    assert "Content-ID: <img1@example.com>" in raw
+    assert "Content-ID: <img2@example.com>" in raw
+
+
+def test_assemble_related_direct():
+    """Direct call to assemble_related produces well-formed multipart/related."""
+    from gmail.gmail_web_mime import assemble_related
+    from tools.golden_skeleton import extract_skeleton
+
+    headers = [
+        ("From", "a@example.com"),
+        ("To", "b@example.com"),
+        ("Subject", "Direct"),
+    ]
+    raw = assemble_related(
+        headers,
+        "plain text",
+        "<div>html text</div>",
+        inline_parts=[
+            {
+                "filename": "inline.jpg",
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": "inline@example.com",
+            }
+        ],
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/related"
+    # Should have alternative + inline
+    assert len(top["parts"]) == 2
+    assert top["parts"][0]["content_type"] == "multipart/alternative"
+    assert top["parts"][0]["parts"][0]["content_type"] == "text/plain"
+    assert top["parts"][0]["parts"][1]["content_type"] == "text/html"
+    assert top["parts"][1]["content_type"] == "image/jpeg"
+    assert top["parts"][1]["disposition"] == "inline"
