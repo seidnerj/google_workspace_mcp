@@ -166,6 +166,28 @@ def build_quote_container_html(attribution_html: str, parent_html: str) -> str:
     )
 
 
+def render_forward_recipients_html(raw_header: str) -> str:
+    """Render a raw address-list header (To/Cc) as Gmail-web forwarded-header HTML.
+
+    Each recipient becomes ``{name} &lt;<a href="mailto:addr">addr</a>&gt;`` when it
+    carries a display name, or a bare ``<a href="mailto:addr">addr</a>`` when it does
+    not (matching Gmail's forwarded To: rendering). Names and addresses are HTML-escaped.
+    """
+    from email.utils import getaddresses
+
+    parts = []
+    for name, email in getaddresses([raw_header or ""]):
+        if not email:
+            continue
+        esc_email = _html.escape(email)
+        link = f'<a href="mailto:{esc_email}">{esc_email}</a>'
+        if name and name.strip():
+            parts.append(f"{_escape_body(name)} &lt;{link}&gt;")
+        else:
+            parts.append(link)
+    return ", ".join(parts)
+
+
 def build_forwarded_container_html(
     from_name: Optional[str],
     from_email: str,

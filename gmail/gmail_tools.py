@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Optional, List, Dict, Literal, Any
 from urllib.parse import unquote, urlparse, urlunsplit
 
+from email.header import Header
 from email.message import EmailMessage
 from email.policy import SMTP
 from email.utils import formataddr, getaddresses, parseaddr
@@ -80,6 +81,7 @@ from gmail.gmail_web_mime import (
     gmail_boundary,
     new_message_html,
     plain_body_to_html,
+    render_forward_recipients_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -1652,7 +1654,12 @@ def _prepare_gmail_message_web(
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
     if bcc and include_bcc_header:
         headers.append(("Bcc", _safe_header("Bcc", bcc)))
-    headers.append(("Subject", _safe_header("Subject", subject)))
+    subj_value = (
+        subject
+        if subject.isascii()
+        else Header(subject, "utf-8").encode(maxlinelen=998)
+    )
+    headers.append(("Subject", _safe_header("Subject", subj_value)))
     if from_email:
         headers.append(
             (
@@ -3066,7 +3073,7 @@ async def _forward_gmail_message_impl(
         from_email=orig_from_email or orig_from_raw,
         date_str=orig_date_str,
         subject=orig_subject,
-        to_rendered=orig_to_raw,
+        to_rendered=render_forward_recipients_html(orig_to_raw),
         orig_html=orig_html,
     )
     if note_html:

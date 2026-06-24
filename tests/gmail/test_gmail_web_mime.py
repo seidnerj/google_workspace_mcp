@@ -436,3 +436,147 @@ class TestChooseCteUnderscore:
         assert result == "quoted-printable", (
             f"Expected 'quoted-printable' for underscore-heavy ASCII, got {result!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — render_forward_recipients_html: escaped + mailto-linked recipients
+# ---------------------------------------------------------------------------
+
+
+class TestRenderForwardRecipientsHtml:
+    """render_forward_recipients_html must produce Gmail-web forwarded-To markup."""
+
+    def test_bare_address_no_display_name(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html("addr@example.com")
+        assert result == '<a href="mailto:addr@example.com">addr@example.com</a>'
+
+    def test_address_with_display_name(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html('"Jane Roe" <jane@example.com>')
+        assert (
+            result
+            == 'Jane Roe &lt;<a href="mailto:jane@example.com">jane@example.com</a>&gt;'
+        )
+
+    def test_multiple_recipients_joined_by_comma_space(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html("a@example.com, b@example.com")
+        assert result == (
+            '<a href="mailto:a@example.com">a@example.com</a>, '
+            '<a href="mailto:b@example.com">b@example.com</a>'
+        )
+
+    def test_injection_regression_display_name_escaped(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        malicious = '"<img src=x onerror=alert(1)>" <a@b.com>'
+        result = render_forward_recipients_html(malicious)
+        # Raw unescaped injection tag must not appear
+        assert "<img" not in result
+        # Escaped form must be present (confirms escaping occurred)
+        assert "&lt;img" in result
+
+    def test_empty_string_returns_empty(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        assert render_forward_recipients_html("") == ""
+
+    def test_build_forwarded_container_uses_mailto_link(self):
+        from gmail.gmail_web_mime import (
+            build_forwarded_container_html,
+            render_forward_recipients_html,
+        )
+
+        to_html = render_forward_recipients_html('"X" <x@example.com>')
+        result = build_forwarded_container_html(
+            from_name="Sender",
+            from_email="sender@example.com",
+            date_str="Mon, 1 Jan 2024",
+            subject="Test",
+            to_rendered=to_html,
+            orig_html="<div>body</div>",
+        )
+        assert '<a href="mailto:x@example.com">' in result
+        # The raw unescaped angle-bracket tag <x@example.com> must NOT appear
+        assert "<x@example.com>" not in result
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — non-ASCII Subject must be RFC 2047-encoded in _prepare_gmail_message
+# ---------------------------------------------------------------------------
+
+
+class TestNonAsciiSubjectEncoding:
+    """Non-ASCII Subject headers must be RFC 2047-encoded; ASCII subjects unchanged."""
+
+    def test_non_ascii_subject_produces_encoded_word(self):
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        raw, *_ = _prepare_gmail_message(
+            subject="Hello — world",
+            body="body",
+            to="to@example.com",
+            from_email="from@example.com",
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        subject_line = next(
+            (line for line in msg.splitlines() if line.startswith("Subject:")), None
+        )
+        assert subject_line is not None, "No Subject header found"
+        # Must be ASCII-only (no raw em-dash)
+        assert subject_line.isascii(), (
+            f"Subject line contains non-ASCII: {subject_line!r}"
+        )
+        # Must contain an RFC 2047 encoded-word
+        assert "=?" in subject_line and "?=" in subject_line, (
+            f"Subject is not RFC 2047-encoded: {subject_line!r}"
+        )
+        # Raw em-dash must not appear
+        assert "—" not in subject_line
+
+    def test_ascii_subject_is_unchanged(self):
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        raw, *_ = _prepare_gmail_message(
+            subject="Plain subject",
+            body="body",
+            to="to@example.com",
+            from_email="from@example.com",
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        subject_line = next(
+            (line for line in msg.splitlines() if line.startswith("Subject:")), None
+        )
+        assert subject_line is not None
+        assert subject_line == "Subject: Plain subject"
+
+    def test_non_ascii_subject_round_trips(self):
+        from email.header import decode_header
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        original = "Hello — world"
+        raw, *_ = _prepare_gmail_message(
+            subject=original,
+            body="body",
+            to="to@example.com",
+            from_email="from@example.com",
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        subject_line = next(
+            (line for line in msg.splitlines() if line.startswith("Subject:")), None
+        )
+        assert subject_line is not None
+        encoded_value = subject_line[len("Subject:") :].strip()
+        decoded_parts = decode_header(encoded_value)
+        decoded = "".join(
+            part.decode(charset or "utf-8") if isinstance(part, bytes) else part
+            for part, charset in decoded_parts
+        )
+        assert decoded == original, f"Round-trip failed: {decoded!r} != {original!r}"
