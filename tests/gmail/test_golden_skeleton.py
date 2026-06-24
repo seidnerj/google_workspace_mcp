@@ -164,3 +164,42 @@ def test_attr_template_redacts_date():
 
     # Template must still end with wrote:
     assert tmpl.endswith("wrote:"), f"template malformed: {tmpl!r}"
+
+
+# ---------------------------------------------------------------------------
+# Finding #6 — EMAIL_RE must redact apostrophe-containing local parts
+# ---------------------------------------------------------------------------
+
+
+def test_redact_apostrophe_local_part():
+    """Addresses with apostrophes in the local part must be fully redacted."""
+    from tools.golden_skeleton import _redact
+
+    result = _redact("Send to o'hara@example.com please")
+    assert "o'hara" not in result, f"local part leaked: {result!r}"
+    assert "‹email›" in result, f"placeholder missing: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# Finding #7 — multi-class gmail_attr suppresses inner text
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_html_multi_class_gmail_attr_suppresses_text():
+    """Elements with 'gmail_attr' in a multi-class value must still redact inner text."""
+    out = sanitize_html(
+        '<div class="gmail_attr extra">Real Name &lt;x@example.com&gt;</div>'
+    )
+    # Inner attribution text must not appear
+    assert "Real Name" not in out, f"attribution name leaked: {out!r}"
+    assert "x@example.com" not in out, f"email leaked: {out!r}"
+    # The structural tag itself must be preserved
+    assert 'class="gmail_attr extra"' in out, f"tag class missing: {out!r}"
+
+
+def test_sanitize_html_multi_class_gmail_sendername_suppresses_text():
+    """Elements with 'gmail_sendername' alongside other classes must redact inner text."""
+    out = sanitize_html('<strong class="gmail_sendername bold-name">Jane Doe</strong>')
+    assert "Jane" not in out, f"sender name leaked: {out!r}"
+    assert "Doe" not in out, f"sender name leaked: {out!r}"
+    assert 'class="gmail_sendername bold-name"' in out, f"tag class missing: {out!r}"

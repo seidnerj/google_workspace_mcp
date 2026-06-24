@@ -969,14 +969,8 @@ async def _build_web_compose_raw(
     missing_scopes: set = set()
     if people_service is not None:
         await _warmup_people_cache(people_service)
-    if from_name is None:
-        from_name = await _lookup_display_name(
-            people_service,
-            from_email,
-            name_cache,
-            thread_names=thread_names,
-            missing_scopes=missing_scopes,
-        )
+    # Sender name is NOT contacts-resolved — it comes from Send-As only.
+    # When from_name is None here, the From header renders as the bare address.
     to_fmt = await _format_address_list_with_names(
         people_service,
         to,

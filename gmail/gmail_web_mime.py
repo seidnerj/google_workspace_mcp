@@ -72,7 +72,7 @@ def format_display_address(name: Optional[str], email: str) -> str:
         return formataddr((safe_name, email))
     except UnicodeEncodeError:
         # Non-ASCII name: RFC2047 encoded-word for the display phrase.
-        encoded_name = Header(safe_name, "utf-8").encode()
+        encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998)
         return f"{encoded_name} <{email}>"
 
 
@@ -208,7 +208,7 @@ def build_forwarded_container_html(
         '<div dir="ltr" class="gmail_attr">'
         "---------- Forwarded message ---------<br>"
         f"From: {from_field}<br>"
-        f"Date: {date_str}<br>"
+        f"Date: {_escape_body(date_str)}<br>"
         f"Subject: {safe_subject}<br>"
         f"To: {to_rendered}<br>"
         "</div>"
@@ -293,7 +293,7 @@ def choose_cte(text: str) -> str:
     # overhead for soft line-wraps (worst case one wrap per 75 bytes → 3 extra).
     # In practice the dominant factor is the =XX expansion, so this is accurate
     # enough to pick the same winner as computing `len(quopri.encodestring(raw))`.
-    _QP_SAFE = frozenset(b" \t\r\n" + bytes(range(33, 127))) - {ord("="), ord("_")}
+    _QP_SAFE = frozenset(b" \t\r\n" + bytes(range(33, 127))) - {ord("=")}
     qp_bytes = sum(1 if b in _QP_SAFE else 3 for b in raw)
     # Add soft-wrap overhead: one `=\r\n` per 75 output bytes of content.
     qp_size = qp_bytes + (qp_bytes // 75) * 3

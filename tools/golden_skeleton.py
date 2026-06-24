@@ -10,7 +10,9 @@ import re
 from email import message_from_bytes
 from html.parser import HTMLParser
 
-EMAIL_RE = re.compile(r"[\w.+%-]+@[\w.-]+\.\w+")
+EMAIL_RE = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"
+)
 
 # Elements whose *inner text* must also be redacted (not just dropped as
 # ordinary text nodes) because they carry display names or attribution text.
@@ -162,13 +164,13 @@ class _Sanitizer(HTMLParser):
         super().__init__(convert_charrefs=False)
         self._out: list[str] = []
         # Stack of element class values so we can detect redact-text elements.
-        self._class_stack: list[str] = []
+        self._class_stack: list[set[str]] = []
 
     def _in_redact_element(self) -> bool:
-        return any(cls in _REDACT_TEXT_ELEMENTS for cls in self._class_stack)
+        return any(classes & _REDACT_TEXT_ELEMENTS for classes in self._class_stack)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        cls_val = ""
+        cls_tokens: set[str] = set()
         parts = [f"<{tag}"]
         for name, value in attrs:
             if value is None:
@@ -179,10 +181,10 @@ class _Sanitizer(HTMLParser):
                 redacted = _redact(value)
                 parts.append(f' {name}="{redacted}"')
                 if name == "class":
-                    cls_val = value
+                    cls_tokens = set(value.split())
         parts.append(">")
         self._out.append("".join(parts))
-        self._class_stack.append(cls_val)
+        self._class_stack.append(cls_tokens)
 
     def handle_endtag(self, tag: str) -> None:
         self._out.append(f"</{tag}>")

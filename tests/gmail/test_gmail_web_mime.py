@@ -22,7 +22,7 @@ from gmail.gmail_web_mime import (
     plain_body_to_html,
 )
 
-BOUNDARY_RE = re.compile(r"^0{12}[0-9a-f]{16,18}$")
+BOUNDARY_RE = re.compile(r"^0{12}[0-9a-f]{16}$")
 
 
 class TestBoundary:
@@ -320,3 +320,119 @@ class TestNoToolFingerprints:
         assert "x-mailer" not in headers
         assert "user-agent" not in headers
         assert "message-id" not in headers  # Gmail assigns it
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 — sender name must NOT be contacts/thread-resolved
+# ---------------------------------------------------------------------------
+
+
+class TestSenderNameNotContactsResolved:
+    """When from_name=None, the From header must render as the bare address.
+
+    The sender's display name must come from Send-As only; contacts/thread
+    lookup must never be applied to the sender's own address.
+    """
+
+    def test_from_name_none_renders_bare_address(self):
+        """from_name=None must produce a bare-address From, not a contacts name."""
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        plain, html = _new_bodies("Hello")
+        raw, *_ = _prepare_gmail_message(
+            subject="Test",
+            body=plain,
+            html_body=html,
+            to="ada@example.com",
+            from_email="grace@example.org",
+            from_name=None,  # Send-As had no name; must NOT be contacts-resolved
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        # Must render as bare address, not any resolved display name.
+        assert "From: grace@example.org" in msg
+        # Must NOT contain any display-name form for the sender.
+        assert (
+            "From: " + '"' not in msg
+            or "grace@example.org" in msg.split("From: ", 1)[1].split("\r\n")[0]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 — long non-ASCII name must not produce folding newlines
+# ---------------------------------------------------------------------------
+
+
+class TestLongNonAsciiNameNoFolding:
+    """format_display_address must not insert CR/LF for long non-ASCII names."""
+
+    def test_long_cjk_name_no_crlf(self):
+        """A very long CJK display name must produce no CR or LF in the result."""
+        long_name = "山" * 120  # 120 CJK chars — well over the 75-char fold threshold
+        result = format_display_address(long_name, "user@example.com")
+        assert "\r" not in result, f"CR found in result: {result!r}"
+        assert "\n" not in result, f"LF found in result: {result!r}"
+        assert "<user@example.com>" in result
+
+    def test_long_cjk_name_passes_safe_header_check(self):
+        """Building a message with a long non-ASCII from_name must not raise ValueError."""
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        plain, html = _new_bodies("Hello")
+        long_name = "山" * 120
+        # Must not raise
+        raw, *_ = _prepare_gmail_message(
+            subject="Test",
+            body=plain,
+            html_body=html,
+            to="ada@example.com",
+            from_email="grace@example.org",
+            from_name=long_name,
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        assert "From:" in msg
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 — date_str in forwarded HTML must be HTML-escaped
+# ---------------------------------------------------------------------------
+
+
+class TestForwardedDateEscaping:
+    """date_str in the forwarded-message attr block must be HTML-escaped."""
+
+    def test_date_str_with_html_chars_is_escaped(self):
+        from gmail.gmail_web_mime import build_forwarded_container_html
+
+        malicious_date = '<script>alert("xss")</script>'
+        result = build_forwarded_container_html(
+            from_name=None,
+            from_email="sender@example.com",
+            date_str=malicious_date,
+            subject="Normal Subject",
+            to_rendered="recipient@example.com",
+            orig_html="<div>body</div>",
+        )
+        # Raw tag injection must not appear
+        assert "<script>" not in result
+        # Escaped form must be present (proves escaping occurred)
+        assert "&lt;script&gt;" in result
+        assert "&gt;" in result
+
+
+# ---------------------------------------------------------------------------
+# Finding #4 — underscore-heavy ASCII must choose quoted-printable
+# ---------------------------------------------------------------------------
+
+
+class TestChooseCteUnderscore:
+    """choose_cte must classify underscore-heavy ASCII as quoted-printable."""
+
+    def test_underscore_heavy_returns_qp(self):
+        from gmail.gmail_web_mime import choose_cte
+
+        result = choose_cte("_" * 200)
+        assert result == "quoted-printable", (
+            f"Expected 'quoted-printable' for underscore-heavy ASCII, got {result!r}"
+        )
