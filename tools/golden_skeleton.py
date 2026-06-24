@@ -50,9 +50,9 @@ def _literal_probes(html: str) -> dict:
     )
     if m:
         inner = m.group(1)
-        on = re.match(r"(On .*?, )", inner)
+        on = re.match(r"On .*?, ", inner)
         probes["attr_template"] = (
-            on.group(1) if on else ""
+            "On ‹date›, " if on else ""
         ) + "‹name› &lt;<a href=mailto>‹email›</a>&gt; wrote:"
 
     m = re.search(
@@ -60,8 +60,7 @@ def _literal_probes(html: str) -> dict:
     )
     if m:
         block = m.group(1)
-        block = re.sub(r"(From:|Date:|Subject:|To:|Cc:)\s*[^<]*", r"\1 ‹v›", block)
-        probes["forward_header_block"] = _redact(block)[:600]
+        probes["forward_header_block"] = "".join(_tag_list(block))[:600]
 
     m = re.search(r'<blockquote class="gmail_quote" style="([^"]*)"', html)
     if m:
