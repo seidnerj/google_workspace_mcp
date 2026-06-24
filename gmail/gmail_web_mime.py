@@ -253,7 +253,7 @@ def build_forwarded_plain(
         f"Date: {date_str}\n"
         f"Subject: {subject}\n"
         f"To: {to_rendered_plain}\n"
-        f"\n"
+        "\n"
         f"{orig_plain}"
     )
 

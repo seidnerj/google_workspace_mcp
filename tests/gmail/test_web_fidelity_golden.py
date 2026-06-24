@@ -31,7 +31,7 @@ def _tags(html: str) -> str:
 
 
 def test_forward_container_matches_golden_skeleton():
-    """Brief-specified golden cross-check test."""
+    """Verify builder output yields probes matching golden fixture values."""
     golden = json.loads((FIX / "golden_forward.json").read_text())
     html = build_forwarded_container_html(
         "Jane Roe",
@@ -41,12 +41,23 @@ def test_forward_container_matches_golden_skeleton():
         "joe@example.com",
         "<div>orig</div>",
     )
+    # Probe the builder's output directly and compare to golden fixture.
+    has_gmail_quote_container = 'class="gmail_quote gmail_quote_container"' in html
+    has_gmail_sendername = "gmail_sendername" in html
+    has_blockquote_gmail_quote = "blockquote" in html
+    has_forwarded_literal = "Forwarded message" in html
+
+    assert (
+        has_gmail_quote_container == golden["html_probes"]["has_gmail_quote_container"]
+    )
+    assert has_gmail_sendername == golden["html_probes"]["has_gmail_sendername"]
+    assert (
+        has_blockquote_gmail_quote
+        == golden["html_probes"]["has_blockquote_gmail_quote"]
+    )
+    assert has_forwarded_literal == golden["html_probes"]["has_forwarded_literal"]
+    # Keep the existing tag-skeleton assertions.
     tags = _tags(html)
-    # Cross-check boolean probes against fixture.
-    assert golden["html_probes"]["has_gmail_quote_container"]
-    assert golden["html_probes"]["has_gmail_sendername"]
-    assert not golden["html_probes"]["has_blockquote_gmail_quote"]
-    # Structural assertions on builder output.
     assert 'class="gmail_quote gmail_quote_container"' in tags
     assert 'class="gmail_sendername"' in tags
     assert "blockquote" not in tags
@@ -176,6 +187,8 @@ def test_forward_container_html_nonascii_from_name_escaped():
     # Raw ampersand must NOT appear inside the sendername region
     # (it would indicate unescaped content).
     assert "Ångström & Müller" not in html
+    # Non-ASCII characters themselves survive (it's only the & that gets escaped).
+    assert "Ångström" in html
 
 
 def test_forward_container_html_subject_escaped():
@@ -207,6 +220,22 @@ def test_forward_container_html_to_rendered_passthrough():
         "<div>body</div>",
     )
     assert to_html in html
+
+
+def test_forward_container_html_from_email_escaped():
+    """from_email containing & must be HTML-escaped in output."""
+    html = build_forwarded_container_html(
+        "Test User",
+        "a&b@example.com",
+        "Fri, 6 Jun 2025 at 12:00",
+        "Email escape test",
+        "recipient@example.com",
+        "<div>body</div>",
+    )
+    # The escaped form must appear (in mailto href and in display text)
+    assert "a&amp;b@example.com" in html
+    # The raw, unescaped form must NOT appear
+    assert "a&b@example.com" not in html
 
 
 # ---------------------------------------------------------------------------
