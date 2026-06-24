@@ -37,6 +37,7 @@ from core.config import (
     WORKSPACE_MCP_BASE_URI,
     WORKSPACE_MCP_PORT,
 )
+from gmail.gmail_send_transport import dispatch_transmit, resolve_effective_transport
 from core.http_utils import ssrf_safe_stream
 from core.utils import (
     GOOGLE_API_WRITE_RETRIES,
@@ -913,6 +914,7 @@ async def _build_web_compose_raw(
     auto_thread: bool = True,
     thread_names: Optional[Dict[str, str]] = None,
     attachments: Optional[List[Dict[str, Any]]] = None,
+    include_bcc_header: bool = True,
 ) -> tuple[str, bool, set, int, List[str]]:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
 
@@ -1032,6 +1034,7 @@ async def _build_web_compose_raw(
         from_name=from_name,
         web_compose=True,
         attachments=attachments or None,
+        include_bcc_header=include_bcc_header,
     )
     # A RECIPIENT is "unresolved" if we looked it up (no inline name) and got
     # nothing from contacts or the thread -- the signal for the contacts-scope
@@ -1612,6 +1615,7 @@ def _prepare_gmail_message_web(
     from_name: Optional[str] = None,
     date_header: Optional[str] = None,
     attachments: Optional[List[Dict]] = None,
+    include_bcc_header: bool = True,
 ) -> tuple[str, int, List[str]]:
     """Assemble a Gmail-web faithful message.
 
@@ -1652,7 +1656,7 @@ def _prepare_gmail_message_web(
         headers.append(("References", folded))
     if in_reply_to:
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
-    if bcc:
+    if bcc and include_bcc_header:
         headers.append(("Bcc", _safe_header("Bcc", bcc)))
     headers.append(("Subject", _safe_header("Subject", subject)))
     if from_email:
@@ -1713,6 +1717,7 @@ def _prepare_gmail_message(
     web_compose: bool = False,
     html_body: Optional[str] = None,
     date_header: Optional[str] = None,
+    include_bcc_header: bool = True,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
@@ -1788,6 +1793,7 @@ def _prepare_gmail_message(
             from_name=from_name,
             date_header=date_header,
             attachments=attachments or None,
+            include_bcc_header=include_bcc_header,
         )
         return raw_message, thread_id, _web_count, _web_errors
 
@@ -2854,6 +2860,12 @@ async def send_gmail_message(
 
     resolved_attachments = await _resolve_url_attachments(attachments)
 
+    # Resolve send transport before building the raw message so we know whether
+    # to include the Bcc header (API keeps it; SMTP omits it — envelope-only).
+    effective, transport_creds, fallback_note = resolve_effective_transport(
+        user_google_email
+    )
+
     # Always use the Gmail-web faithful path for both the no-attachment and
     # with-attachment cases so every sent message carries the gmail_quote reply
     # trail and web-faithful MIME structure.
@@ -2881,6 +2893,7 @@ async def send_gmail_message(
         in_reply_to=in_reply_to,
         references=references,
         attachments=resolved_attachments or None,
+        include_bcc_header=(effective == "api"),
     )
     thread_id_final = thread_id
     # Note only when a recipient actually went unresolved AND more scope would
@@ -2901,25 +2914,29 @@ async def send_gmail_message(
             f"{details}"
         )
 
-    send_body = {"raw": raw_message}
-
-    # Associate with thread if provided
-    if thread_id_final:
-        send_body["threadId"] = thread_id_final
-
-    # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
+    attachment_info = (
+        _format_attachment_result(attached_count, requested_attachment_count)
+        if requested_attachment_count > 0
+        else ""
     )
-    message_id = sent_message.get("id")
 
-    if requested_attachment_count > 0:
-        attachment_info = _format_attachment_result(
-            attached_count, requested_attachment_count
-        )
-        return f"Email sent{attachment_info}! Message ID: {message_id}{name_note}"
-    return f"Email sent! Message ID: {message_id}{name_note}"
+    return await dispatch_transmit(
+        service,
+        effective=effective,
+        creds=transport_creds,
+        fallback_note=fallback_note,
+        raw_message_b64=raw_message,
+        thread_id_final=thread_id_final,
+        sender=sender_email,
+        to=[to] if to else None,
+        cc=[cc] if cc else None,
+        bcc=[bcc] if bcc else None,
+        subject=reply_subject,
+        user_google_email=user_google_email,
+        action_label="Email sent",
+        attachment_info=attachment_info,
+        trailing_note=name_note,
+    )
 
 
 # Internal implementation function for testing
@@ -3065,6 +3082,13 @@ async def _forward_gmail_message_impl(
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
+
+    # Resolve send transport before building the raw message so we know whether
+    # to include the Bcc header (API keeps it; SMTP omits it — envelope-only).
+    effective, transport_creds, fallback_note = resolve_effective_transport(
+        user_google_email
+    )
+
     raw_message, _fwd_count, _fwd_errors = _prepare_gmail_message_web(
         subject=forward_subject,
         plain_body=forward_plain,
@@ -3075,23 +3099,32 @@ async def _forward_gmail_message_impl(
         from_email=sender_email,
         from_name=from_name,
         attachments=attachments_to_send if attachments_to_send else None,
+        include_bcc_header=(effective == "api"),
     )
-
-    send_body = {"raw": raw_message}
-
-    # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
-    )
-    sent_message_id = sent_message.get("id")
 
     attachment_info = (
         _format_attachment_result(len(attachments_to_send), len(attachments_to_send))
         if attachments_to_send
         else ""
     )
-    return f"Email forwarded{attachment_info}! Message ID: {sent_message_id}"
+
+    return await dispatch_transmit(
+        service,
+        effective=effective,
+        creds=transport_creds,
+        fallback_note=fallback_note,
+        raw_message_b64=raw_message,
+        thread_id_final=None,
+        sender=sender_email,
+        to=[to] if to else None,
+        cc=[cc] if cc else None,
+        bcc=[bcc] if bcc else None,
+        subject=forward_subject,
+        user_google_email=user_google_email,
+        action_label="Email forwarded",
+        attachment_info=attachment_info,
+        trailing_note="",
+    )
 
 
 @server.tool(

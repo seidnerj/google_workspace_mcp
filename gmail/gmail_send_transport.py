@@ -95,6 +95,8 @@ async def dispatch_transmit(
     subject: str,
     user_google_email: str,
     action_label: str = "Email sent",
+    attachment_info: str = "",
+    trailing_note: str = "",
 ) -> str:
     """Transmit a pre-encoded RFC 822 message via the resolved transport.
 
@@ -102,7 +104,7 @@ async def dispatch_transmit(
     MIME message.  Returns a human-readable result string.
     """
     if effective == "smtp":
-        return await _dispatch_smtp(
+        result = await _dispatch_smtp(
             service=service,
             creds=creds,
             raw_message_b64=raw_message_b64,
@@ -113,7 +115,10 @@ async def dispatch_transmit(
             subject=subject,
             user_google_email=user_google_email,
             action_label=action_label,
+            attachment_info=attachment_info,
+            trailing_note=trailing_note,
         )
+        return result
 
     # API path
     send_body: dict = {"raw": raw_message_b64}
@@ -125,7 +130,7 @@ async def dispatch_transmit(
         num_retries=GOOGLE_API_WRITE_RETRIES,
     )
     mid = sent.get("id")
-    return f"{action_label}! Message ID: {mid}{fallback_note}"
+    return f"{action_label}{attachment_info}! Message ID: {mid}{fallback_note}{trailing_note}"
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +164,8 @@ async def _dispatch_smtp(
     subject: str,
     user_google_email: str,
     action_label: str,
+    attachment_info: str = "",
+    trailing_note: str = "",
 ) -> str:
     from google.auth.transport.requests import Request  # local import to avoid cycles
 
@@ -192,7 +199,7 @@ async def _dispatch_smtp(
         action_label=action_label,
         resp=resp,
     )
-    return f"{action_label} via SMTP! (queued: {resp}) {mid_suffix}"
+    return f"{action_label}{attachment_info} via SMTP! (queued: {resp}) {mid_suffix}{trailing_note}"
 
 
 async def _lookup_message_id(
