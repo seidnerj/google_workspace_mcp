@@ -420,14 +420,14 @@ async def test_forward_attachment_download_failure_raises():
 def test_prepare_web_no_attachments_param_absent_vs_none_same_structure():
     """Calling _prepare_gmail_message_web without attachments= and with
     attachments=None must both produce multipart/alternative (same structure)."""
-    result_default = _prepare_gmail_message_web(
+    result_default, *_ = _prepare_gmail_message_web(
         subject="Test",
         plain_body="plain",
         html_body="<div>html</div>",
         to="r@example.com",
         from_email="s@example.com",
     )
-    result_none = _prepare_gmail_message_web(
+    result_none, *_ = _prepare_gmail_message_web(
         subject="Test",
         plain_body="plain",
         html_body="<div>html</div>",
@@ -447,7 +447,7 @@ def test_prepare_web_no_attachments_param_absent_vs_none_same_structure():
 
 def test_prepare_web_no_attachments_produces_alternative():
     """_prepare_gmail_message_web with no attachments → multipart/alternative."""
-    raw_b64 = _prepare_gmail_message_web(
+    raw_b64, *_ = _prepare_gmail_message_web(
         subject="Subj",
         plain_body="plain",
         html_body="<div>html</div>",
@@ -460,7 +460,7 @@ def test_prepare_web_no_attachments_produces_alternative():
 
 def test_prepare_web_with_attachments_produces_mixed():
     """_prepare_gmail_message_web with attachments → multipart/mixed."""
-    raw_b64 = _prepare_gmail_message_web(
+    raw_b64, count, errors = _prepare_gmail_message_web(
         subject="Fwd: doc",
         plain_body="plain",
         html_body="<div>html</div>",
@@ -470,6 +470,8 @@ def test_prepare_web_with_attachments_produces_mixed():
             {"filename": "a.pdf", "mime_type": "application/pdf", "data": b"%PDF-1.4"}
         ],
     )
+    assert count == 1
+    assert errors == []
     sk = _skeleton(base64.urlsafe_b64decode(raw_b64))
     top = sk["mime_tree"][0]
     assert top["content_type"] == "multipart/mixed"

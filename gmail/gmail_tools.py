@@ -67,7 +67,7 @@ from gmail.gmail_helpers import (
 )
 from gmail.gmail_web_mime import (
     assemble_alternative,
-    assemble_mixed,
+    assemble_web_message,
     build_forwarded_container_html,
     build_forwarded_plain,
     build_quote_container_html,
@@ -431,88 +431,6 @@ def _append_signature_to_body(
         return body
     separator = "\n\n" if body.strip() else ""
     return f"{body}{separator}{signature_text}"
-
-
-async def _fetch_original_for_quote(
-    service, thread_id: str, in_reply_to: Optional[str] = None
-) -> Optional[dict]:
-    """Fetch the original message from a thread for quoting in a reply.
-
-    When *in_reply_to* is provided the function looks for that specific
-    Message-ID inside the thread.  Otherwise it falls back to the last
-    message in the thread.
-
-    Returns a dict with keys: sender, date, text_body, html_body -- or
-    *None* when the message cannot be retrieved.
-    """
-    context = await _fetch_thread_reply_context(
-        service, thread_id, in_reply_to=in_reply_to, include_bodies=True
-    )
-    if not context or not context.get("target"):
-        return None
-
-    target = context["target"]
-    return {
-        "sender": target.get("from") or "unknown",
-        "date": target.get("date", ""),
-        "text_body": target.get("text_body", ""),
-        "html_body": target.get("html_body", ""),
-    }
-
-
-def _build_quoted_reply_body(
-    reply_body: str,
-    body_format: Literal["plain", "html"],
-    signature_html: str,
-    original: dict,
-) -> str:
-    """Assemble reply body + signature + quoted original message.
-
-    Layout:
-        reply_body
-        -- signature --
-        On {date}, {sender} wrote:
-        > quoted original
-    """
-    if original.get("date"):
-        attribution = f"On {original['date']}, {original['sender']} wrote:"
-    else:
-        attribution = f"{original['sender']} wrote:"
-
-    if body_format == "html":
-        # Signature
-        sig_block = ""
-        if signature_html and signature_html.strip():
-            sig_block = f"<br><br>{signature_html}"
-
-        # Quoted original
-        orig_html = original.get("html_body") or ""
-        if not orig_html:
-            orig_text = original.get("text_body", "")
-            orig_html = f"<pre>{html.escape(orig_text)}</pre>"
-
-        quote_block = (
-            '<br><br><div class="gmail_quote">'
-            f"<span>{html.escape(attribution)}</span><br>"
-            '<blockquote style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex">'
-            f"{orig_html}"
-            "</blockquote></div>"
-        )
-        return f"{reply_body}{sig_block}{quote_block}"
-
-    # Plain text path
-    sig_block = ""
-    if signature_html and signature_html.strip():
-        sig_text = _html_to_text(signature_html).strip()
-        if sig_text:
-            sig_block = f"\n\n{sig_text}"
-
-    orig_text = original.get("text_body") or ""
-    if not orig_text and original.get("html_body"):
-        orig_text = _html_to_text(original["html_body"])
-    quoted_lines = "\n".join(f"> {line}" for line in orig_text.splitlines())
-
-    return f"{reply_body}{sig_block}\n\n{attribution}\n{quoted_lines}"
 
 
 async def _get_send_as_entries(service) -> List[Dict[str, Any]]:
@@ -994,13 +912,15 @@ async def _build_web_compose_raw(
     reply_target: Optional[Dict[str, Any]] = None,
     auto_thread: bool = True,
     thread_names: Optional[Dict[str, str]] = None,
-) -> tuple[str, bool, set]:
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[str, bool, set, int, List[str]]:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
 
-    Returns ``(raw_message, had_unresolved, missing_scopes)``. ``had_unresolved``
-    is True when at least one looked-up recipient yielded no display name;
-    ``missing_scopes`` holds the name-resolution scopes that returned a scope
-    error. Together they drive the caller's scope-fallback note.
+    Returns ``(raw_message, had_unresolved, missing_scopes, attached_count,
+    attachment_errors)``. ``had_unresolved`` is True when at least one
+    looked-up recipient yielded no display name; ``missing_scopes`` holds the
+    name-resolution scopes that returned a scope error. Together they drive the
+    caller's scope-fallback note.
 
     Resolves display names (best-effort), auto-populates reply headers from the
     thread (when ``auto_thread`` and not pre-supplied), builds both body parts
@@ -1010,6 +930,8 @@ async def _build_web_compose_raw(
     re-fetching the thread. ``thread_names`` supplies sender-supplied display
     names harvested from the conversation (used when the caller already fetched
     the thread). Never raises for name-resolution or parent-fetch failures.
+    When ``attachments`` is provided they are passed through to the web MIME
+    assembler so the resulting message is web-faithful even with attachments.
     """
     # Fetch the thread once (with bodies) when replying so a single round-trip
     # serves both auto-threading and the reply-quote trail.
@@ -1096,7 +1018,7 @@ async def _build_web_compose_raw(
             reply_target=reply_target,
         )
 
-    raw_message, _thread, _count, _errors = _prepare_gmail_message(
+    raw_message, _thread, attached_count, attachment_errors = _prepare_gmail_message(
         subject=subject,
         body=new_plain,
         html_body=new_html,
@@ -1109,6 +1031,7 @@ async def _build_web_compose_raw(
         from_email=from_email,
         from_name=from_name,
         web_compose=True,
+        attachments=attachments or None,
     )
     # A RECIPIENT is "unresolved" if we looked it up (no inline name) and got
     # nothing from contacts or the thread -- the signal for the contacts-scope
@@ -1118,7 +1041,13 @@ async def _build_web_compose_raw(
     had_unresolved = any(
         value is None for key, value in name_cache.items() if key != sender_key
     )
-    return raw_message, had_unresolved, missing_scopes
+    return (
+        raw_message,
+        had_unresolved,
+        missing_scopes,
+        attached_count,
+        attachment_errors,
+    )
 
 
 async def _build_web_reply_bodies(
@@ -1389,6 +1318,156 @@ def _format_resolved_attachment_error(attachment: Dict[str, Any]) -> str:
     return f"{label}: {detail}"
 
 
+def _split_resolved_attachments(
+    resolved: List[Dict[str, Any]],
+) -> tuple[List[dict], List[dict], int, List[str]]:
+    """Split a list of resolved attachments into inline and regular parts.
+
+    Replicates the classification logic in ``_prepare_gmail_message``'s
+    attachment loop so both the legacy EmailMessage path and the web-faithful
+    MIME path share identical behaviour.
+
+    Args:
+        resolved: List of attachment dicts, each produced by
+            ``_resolve_url_attachments`` (keys: ``_resolved_bytes``/``content``/
+            ``data``, ``filename``, ``mime_type``, optional ``content_id``,
+            optional ``error``).
+
+    Returns:
+        ``(inline_parts, attachment_parts, attached_count, attachment_errors)``
+
+        ``inline_parts`` — dicts for ``assemble_web_message``'s inline_parts
+            argument: ``{filename, mime_type, data: bytes, content_id: str}``.
+        ``attachment_parts`` — dicts for the attachment_parts argument:
+            ``{filename, mime_type, data: bytes}``.
+        ``attached_count`` — total valid parts added across both lists.
+        ``attachment_errors`` — user-facing error strings for skipped entries.
+    """
+    inline_parts: List[dict] = []
+    attachment_parts: List[dict] = []
+    attached_count = 0
+    attachment_errors: List[str] = []
+    seen_content_ids: set[str] = set()
+
+    for attachment in resolved:
+        if attachment.get("error"):
+            attachment_errors.append(_format_resolved_attachment_error(attachment))
+            continue
+
+        filename = attachment.get("filename")
+        mime_type = attachment.get("mime_type")
+        content_id = attachment.get("content_id")
+
+        # Accept bytes from four sources: pre-resolved URL bytes, a raw ``data``
+        # bytes value (used by the forward path), base64-encoded content string,
+        # or a local file path (read from disk here so the helper is self-contained
+        # and works whether or not the caller pre-resolved file paths).
+        resolved_bytes = attachment.get("_resolved_bytes")
+        raw_data = attachment.get("data")
+        content_base64 = attachment.get("content")
+        file_path = attachment.get("path")
+
+        try:
+            if resolved_bytes is not None:
+                file_data = resolved_bytes
+                if not filename:
+                    filename = "attachment"
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            elif raw_data is not None:
+                file_data = raw_data
+                if not filename:
+                    filename = "attachment"
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            elif content_base64:
+                if not filename:
+                    logger.warning("Skipping attachment: missing filename")
+                    continue
+                file_data = base64.b64decode(content_base64)
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            elif file_path:
+                path_obj = validate_file_path(file_path)
+                if not path_obj.exists():
+                    logger.error("File not found: %s", file_path)
+                    continue
+                with open(path_obj, "rb") as fh:
+                    file_data = fh.read()
+                if not filename:
+                    filename = path_obj.name
+                if not mime_type:
+                    mime_type, _ = mimetypes.guess_type(str(path_obj))
+                    if not mime_type:
+                        mime_type = "application/octet-stream"
+            else:
+                logger.warning(
+                    "Skipping attachment: no data, _resolved_bytes, content, or path"
+                )
+                continue
+
+            safe_filename = (
+                (filename or "attachment")
+                .replace("\r", "")
+                .replace("\n", "")
+                .replace("\x00", "")
+            ) or "attachment"
+
+            if not mime_type:
+                mime_type = "application/octet-stream"
+
+            if content_id:
+                cid_value = _normalize_attachment_content_id(content_id)
+                if cid_value in seen_content_ids:
+                    logger.warning(
+                        "Duplicate content_id %r on attachment %s; "
+                        "email clients may only render one instance",
+                        cid_value,
+                        filename,
+                    )
+                seen_content_ids.add(cid_value)
+                inline_parts.append(
+                    {
+                        "filename": safe_filename,
+                        "mime_type": mime_type,
+                        "data": file_data,
+                        "content_id": cid_value,
+                    }
+                )
+                logger.info(
+                    "Classified inline (cid=%s): %s (%d bytes)",
+                    cid_value,
+                    safe_filename,
+                    len(file_data),
+                )
+            else:
+                attachment_parts.append(
+                    {
+                        "filename": safe_filename,
+                        "mime_type": mime_type,
+                        "data": file_data,
+                    }
+                )
+                logger.info(
+                    "Classified attachment: %s (%d bytes)",
+                    safe_filename,
+                    len(file_data),
+                )
+            attached_count += 1
+        except (binascii.Error, ValueError) as e:
+            logger.error("Failed to decode attachment %s: %s", filename or file_path, e)
+            attachment_errors.append(_format_attachment_error(file_path, filename, e))
+            continue
+        except Exception as e:
+            logger.error(
+                "Failed to classify attachment %s: %s", filename or file_path, e
+            )
+            attachment_errors.append(_format_attachment_error(file_path, filename, e))
+            continue
+
+    return inline_parts, attachment_parts, attached_count, attachment_errors
+
+
 def _try_read_local_attachment(url: str) -> Optional[tuple[bytes, str, Optional[str]]]:
     """Try to resolve a URL as an MCP attachment stored on local disk.
 
@@ -1527,20 +1606,25 @@ def _prepare_gmail_message_web(
     from_name: Optional[str] = None,
     date_header: Optional[str] = None,
     attachments: Optional[List[Dict]] = None,
-) -> str:
+) -> tuple[str, int, List[str]]:
     """Assemble a Gmail-web faithful message.
 
     ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
     text/html parts (including any reply quote trail) built by the async caller.
-    Returns the base64url-encoded raw message. To/Cc/Bcc are expected
-    pre-formatted; From is formatted here from ``from_email`` + optional
-    ``from_name``.
+    Returns ``(raw_b64url, attached_count, attachment_errors)``.
+    To/Cc/Bcc are expected pre-formatted; From is formatted here from
+    ``from_email`` + optional ``from_name``.
 
-    When ``attachments`` is falsy, produces ``multipart/alternative`` (single
-    ``gmail_boundary()``). When attachments are present, produces
-    ``multipart/mixed`` → [``multipart/alternative``] + one part per attachment.
-    Each attachment dict must have ``filename``, ``mime_type``, and ``data``
-    (bytes).
+    Selects the smallest sufficient MIME structure via ``assemble_web_message``:
+
+    - No attachments → ``multipart/alternative``
+    - Regular-only → ``multipart/mixed`` → [alternative, attachments...]
+    - Inline-only → ``multipart/related`` → [alternative, inline...]
+    - Both → ``multipart/mixed`` → [``multipart/related``, attachments...]
+
+    ``attachments`` is a list of resolved attachment dicts (keys:
+    ``_resolved_bytes``/``content``/``data``, ``filename``, ``mime_type``,
+    optional ``content_id``, optional ``error``).
     """
 
     # Reject CR/LF in any user-controlled header value before assembly: bare
@@ -1577,23 +1661,34 @@ def _prepare_gmail_message_web(
     if cc:
         headers.append(("Cc", _safe_header("Cc", cc)))
 
-    if attachments:
-        message = assemble_mixed(
-            headers=headers,
-            plain_text=plain_body,
-            html_text=html_body,
-            attachments=attachments,
-            boundary_mixed=gmail_boundary(),
-            boundary_alt=gmail_boundary(),
-        )
-    else:
+    if not attachments:
         message = assemble_alternative(
             headers=headers,
             plain_text=plain_body,
             html_text=html_body,
             boundary=gmail_boundary(),
         )
-    return encode_raw(message)
+        return encode_raw(message), 0, []
+
+    inline_parts, attachment_parts, attached_count, attachment_errors = (
+        _split_resolved_attachments(attachments)
+    )
+
+    boundary_alt = gmail_boundary()
+    boundary_related = gmail_boundary() if inline_parts else None
+    boundary_mixed = gmail_boundary() if attachment_parts or inline_parts else None
+
+    message = assemble_web_message(
+        headers=headers,
+        plain_text=plain_body,
+        html_text=html_body,
+        inline_parts=inline_parts or None,
+        attachment_parts=attachment_parts or None,
+        boundary_alt=boundary_alt,
+        boundary_related=boundary_related,
+        boundary_mixed=boundary_mixed,
+    )
+    return encode_raw(message), attached_count, attachment_errors
 
 
 def _prepare_gmail_message(
@@ -1616,18 +1711,14 @@ def _prepare_gmail_message(
     """
     Prepare a Gmail message with threading and attachment support.
 
-    When ``web_compose`` is True (and no attachments are supplied), the message
-    is assembled to be byte-faithful to a Gmail-web compose: a
-    ``multipart/alternative`` with a Gmail-style boundary, both a text/plain and
-    a text/html part (always), ``charset="UTF-8"`` (uppercase) + quoted-printable
-    on each part, and headers authored in Gmail's order. On this path ``body`` is
-    the fully-assembled text/plain content and ``html_body`` is the
-    fully-assembled text/html content (both built by the async caller, including
-    any ``gmail_quote`` reply trail). ``to``/``cc``/``bcc`` are expected
-    pre-formatted (``Display Name <addr>``); ``from`` is formatted here from
-    ``from_email`` + optional ``from_name``. Attachments are not supported on this
-    path; if any are supplied the function falls back to the standard
-    EmailMessage builder.
+    When ``web_compose`` is True the message is assembled to be byte-faithful
+    to a Gmail-web compose via ``_prepare_gmail_message_web``.  ``body`` is the
+    fully-assembled text/plain content and ``html_body`` is the fully-assembled
+    text/html content (both built by the async caller, including any
+    ``gmail_quote`` reply trail).  Attachments (inline or regular) are also
+    handled on this path via ``assemble_web_message``.  ``to``/``cc``/``bcc``
+    are expected pre-formatted (``Display Name <addr>``); ``from`` is formatted
+    here from ``from_email`` + optional ``from_name``.
 
     Args:
         subject: Email subject
@@ -1657,10 +1748,10 @@ def _prepare_gmail_message(
     if normalized_format not in {"plain", "html"}:
         raise ValueError("body_format must be either 'plain' or 'html'.")
 
-    # Gmail-web faithful path: build multipart/alternative by hand so charset
-    # casing, boundary shape, and part ordering match a real web compose. Only
-    # taken when no attachments are present (the spec targets that case).
-    if web_compose and not attachments:
+    # Gmail-web faithful path: build MIME by hand so charset casing, boundary
+    # shape, and part ordering match a real web compose. Taken whenever
+    # web_compose is set (regardless of whether attachments are present).
+    if web_compose:
         # ``body`` is the assembled text/plain content. ``html_body`` is the
         # assembled text/html content; when the caller did not supply one, derive
         # it from ``body`` so the path still yields both parts.
@@ -1678,7 +1769,7 @@ def _prepare_gmail_message(
             plain_part = body
             html_part = new_message_html(plain_body_to_html(body))
 
-        raw_message = _prepare_gmail_message_web(
+        raw_message, _web_count, _web_errors = _prepare_gmail_message_web(
             subject=reply_subject,
             plain_body=plain_part,
             html_body=html_part,
@@ -1690,8 +1781,9 @@ def _prepare_gmail_message(
             from_email=from_email,
             from_name=from_name,
             date_header=date_header,
+            attachments=attachments or None,
         )
-        return raw_message, thread_id, 0, []
+        return raw_message, thread_id, _web_count, _web_errors
 
     attached_count = 0
     attachment_errors: List[str] = []
@@ -1734,125 +1826,52 @@ def _prepare_gmail_message(
     else:
         message.set_content(body)
 
-    seen_content_ids: set[str] = set()
+    inline_parts, attachment_parts, attached_count, split_errors = (
+        _split_resolved_attachments(list(attachments or []))
+    )
+    attachment_errors.extend(split_errors)
 
-    for attachment in attachments or []:
-        if attachment.get("error"):
-            attachment_errors.append(_format_resolved_attachment_error(attachment))
-            continue
+    # Build the EmailMessage tree from the classified parts.
+    for ip in inline_parts:
+        main_type, sub_type = (
+            ip["mime_type"].split("/", 1)
+            if "/" in ip["mime_type"]
+            else ("application", "octet-stream")
+        )
+        cid_value = ip["content_id"]
+        target = None
+        for part in message.walk():
+            if part.get_content_type() == "multipart/related":
+                target = part
+                break
+        if target is None:
+            for part in message.walk():
+                if part.get_content_type() == "text/html":
+                    target = part
+                    break
+        if target is None:
+            target = message
+        target.add_related(
+            ip["data"],
+            maintype=main_type,
+            subtype=sub_type,
+            cid=f"<{cid_value}>",
+            filename=ip["filename"],
+            disposition="inline",
+        )
 
-        file_path = attachment.get("path")
-        filename = attachment.get("filename")
-        content_base64 = attachment.get("content")
-        resolved_bytes = attachment.get("_resolved_bytes")
-        mime_type = attachment.get("mime_type")
-        content_id = attachment.get("content_id")
-
-        try:
-            if resolved_bytes is not None:
-                # Pre-resolved from a URL by _resolve_url_attachments.
-                file_data = resolved_bytes
-                if not filename:
-                    filename = "attachment"
-                if not mime_type:
-                    mime_type = "application/octet-stream"
-            elif file_path:
-                path_obj = validate_file_path(file_path)
-                if not path_obj.exists():
-                    logger.error(f"File not found: {file_path}")
-                    continue
-
-                with open(path_obj, "rb") as f:
-                    file_data = f.read()
-
-                if not filename:
-                    filename = path_obj.name
-
-                if not mime_type:
-                    mime_type, _ = mimetypes.guess_type(str(path_obj))
-                    if not mime_type:
-                        mime_type = "application/octet-stream"
-            elif content_base64:
-                if not filename:
-                    logger.warning("Skipping attachment: missing filename")
-                    continue
-
-                file_data = base64.b64decode(content_base64)
-                if not mime_type:
-                    mime_type = "application/octet-stream"
-            else:
-                logger.warning("Skipping attachment: missing path, content, and url")
-                continue
-
-            safe_filename = (
-                (filename or "attachment")
-                .replace("\r", "")
-                .replace("\n", "")
-                .replace("\x00", "")
-            ) or "attachment"
-
-            main_type, sub_type = (
-                mime_type.split("/", 1)
-                if mime_type and "/" in mime_type
-                else ("application", "octet-stream")
-            )
-            if content_id:
-                cid_value = _normalize_attachment_content_id(content_id)
-                if cid_value in seen_content_ids:
-                    logger.warning(
-                        "Duplicate content_id %r on attachment %s; "
-                        "email clients may only render one instance",
-                        cid_value,
-                        filename or file_path,
-                    )
-                seen_content_ids.add(cid_value)
-                # Find the right MIME part to attach the inline image to.
-                # First inline image: target text/html (creates multipart/related).
-                # Subsequent inline images: target the existing multipart/related
-                # (appends as sibling). Use walk() for recursive search since
-                # iter_parts() only iterates direct children and html may be nested
-                # inside multipart/related after the first inline image is added.
-                target = None
-                for part in message.walk():
-                    if part.get_content_type() == "multipart/related":
-                        target = part
-                        break
-                if target is None:
-                    for part in message.walk():
-                        if part.get_content_type() == "text/html":
-                            target = part
-                            break
-                if target is None:
-                    target = message  # Plain-text body fallback
-                target.add_related(
-                    file_data,
-                    maintype=main_type,
-                    subtype=sub_type,
-                    cid=f"<{cid_value}>",
-                    filename=safe_filename,
-                    disposition="inline",
-                )
-                logger.info(
-                    f"Attached inline (cid={cid_value}): "
-                    f"{safe_filename} ({len(file_data)} bytes)"
-                )
-            else:
-                message.add_attachment(
-                    file_data,
-                    maintype=main_type,
-                    subtype=sub_type,
-                    filename=safe_filename,
-                )
-                logger.info(f"Attached file: {safe_filename} ({len(file_data)} bytes)")
-            attached_count += 1
-        except (binascii.Error, ValueError) as e:
-            logger.error(f"Failed to decode attachment {filename or file_path}: {e}")
-            attachment_errors.append(_format_attachment_error(file_path, filename, e))
-            continue
-        except Exception as e:
-            logger.error(f"Failed to attach {filename or file_path}: {e}")
-            attachment_errors.append(_format_attachment_error(file_path, filename, e))
-            continue
+    for ap in attachment_parts:
+        main_type, sub_type = (
+            ap["mime_type"].split("/", 1)
+            if "/" in ap["mime_type"]
+            else ("application", "octet-stream")
+        )
+        message.add_attachment(
+            ap["data"],
+            maintype=main_type,
+            subtype=sub_type,
+            filename=ap["filename"],
+        )
 
     # Encode message
     raw_message = base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode()
@@ -2829,70 +2848,42 @@ async def send_gmail_message(
 
     resolved_attachments = await _resolve_url_attachments(attachments)
 
-    # Without attachments, emit a Gmail-web faithful multipart/alternative with
-    # resolved display names and a real reply quote trail. With attachments, fall
-    # back to the standard builder (the web path targets the no-attachment case).
-    if not resolved_attachments:
-        reply_subject = subject
-        if in_reply_to and not subject.lower().startswith("re:"):
-            reply_subject = f"Re: {subject}"
-        raw_message, had_unresolved, missing_scopes = await _build_web_compose_raw(
-            service,
-            people_service,
-            subject=reply_subject,
-            body=send_body_content,
-            body_format=body_format,
-            to=to,
-            cc=cc,
-            bcc=bcc,
-            from_email=sender_email,
-            from_name=from_name,
-            thread_id=thread_id,
-            in_reply_to=in_reply_to,
-            references=references,
-        )
-        thread_id_final = thread_id
-        attached_count = 0
-        attachment_errors = []
-        # Note only when a recipient actually went unresolved AND more scope would
-        # help (no People service at all, or a tier returned a scope error).
-        name_note = (
-            _build_name_fallback_note(people_service is None, missing_scopes)
-            if had_unresolved
-            else ""
-        )
-    else:
-        name_note = ""
-        # Derive reply headers for the attachments path too, so thread replies
-        # with attachments thread identically to those without (the web path
-        # above already does this internally).
-        if thread_id and (not in_reply_to or not references):
-            context = await _fetch_thread_reply_context(
-                service,
-                thread_id,
-                in_reply_to=in_reply_to,
-                include_bodies=False,
-            )
-            message_ids = context.get("message_ids", []) if context else []
-            in_reply_to, references = _derive_reply_headers(
-                message_ids, in_reply_to, references
-            )
-        raw_message, thread_id_final, attached_count, attachment_errors = (
-            _prepare_gmail_message(
-                subject=subject,
-                body=send_body_content,
-                to=to,
-                cc=cc,
-                bcc=bcc,
-                thread_id=thread_id,
-                in_reply_to=in_reply_to,
-                references=references,
-                body_format=body_format,
-                from_email=sender_email,
-                from_name=from_name,
-                attachments=resolved_attachments,
-            )
-        )
+    # Always use the Gmail-web faithful path for both the no-attachment and
+    # with-attachment cases so every sent message carries the gmail_quote reply
+    # trail and web-faithful MIME structure.
+    reply_subject = subject
+    if in_reply_to and not subject.lower().startswith("re:"):
+        reply_subject = f"Re: {subject}"
+    (
+        raw_message,
+        had_unresolved,
+        missing_scopes,
+        attached_count,
+        attachment_errors,
+    ) = await _build_web_compose_raw(
+        service,
+        people_service,
+        subject=reply_subject,
+        body=send_body_content,
+        body_format=body_format,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        from_email=sender_email,
+        from_name=from_name,
+        thread_id=thread_id,
+        in_reply_to=in_reply_to,
+        references=references,
+        attachments=resolved_attachments or None,
+    )
+    thread_id_final = thread_id
+    # Note only when a recipient actually went unresolved AND more scope would
+    # help (no People service at all, or a tier returned a scope error).
+    name_note = (
+        _build_name_fallback_note(people_service is None, missing_scopes)
+        if had_unresolved
+        else ""
+    )
 
     requested_attachment_count = len(attachments or [])
     if requested_attachment_count > 0 and attached_count == 0:
@@ -3068,7 +3059,7 @@ async def _forward_gmail_message_impl(
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
-    raw_message = _prepare_gmail_message_web(
+    raw_message, _fwd_count, _fwd_errors = _prepare_gmail_message_web(
         subject=forward_subject,
         plain_body=forward_plain,
         html_body=forward_html,
@@ -3348,71 +3339,40 @@ async def draft_gmail_message(
 
     resolved_attachments = await _resolve_url_attachments(attachments)
 
-    if not resolved_attachments:
-        # Gmail-web faithful path. The body carries the signature; the quote
-        # trail is added by the web helper only when quote_original is set.
-        draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
-        raw_message, had_unresolved, missing_scopes = await _build_web_compose_raw(
-            service,
-            people_service,
-            subject=draft_subject,
-            body=draft_body,
-            body_format=body_format,
-            to=to,
-            cc=cc,
-            bcc=bcc,
-            from_email=sender_email,
-            from_name=from_name,
-            thread_id=thread_id,
-            in_reply_to=in_reply_to,
-            references=references,
-            quote_reply=quote_original,
-            reply_target=target_reply,
-            auto_thread=False,
-            thread_names=draft_thread_names,
-        )
-        attached_count = 0
-        attachment_errors = []
-        name_note = (
-            _build_name_fallback_note(people_service is None, missing_scopes)
-            if had_unresolved
-            else ""
-        )
-    else:
-        name_note = ""
-        if quote_original and target_reply:
-            draft_body = _build_quoted_reply_body(
-                draft_body,
-                body_format,
-                signature_html,
-                {
-                    "sender": target_reply.get("from") or "unknown",
-                    "date": target_reply.get("date", ""),
-                    "text_body": target_reply.get("text_body", ""),
-                    "html_body": target_reply.get("html_body", ""),
-                },
-            )
-        else:
-            draft_body = _append_signature_to_body(
-                draft_body, body_format, signature_html
-            )
-
-        raw_message, _thread_id_final, attached_count, attachment_errors = (
-            _prepare_gmail_message(
-                subject=subject,
-                body=draft_body,
-                body_format=body_format,
-                to=to,
-                cc=cc,
-                bcc=bcc,
-                thread_id=thread_id,
-                in_reply_to=in_reply_to,
-                references=references,
-                from_email=sender_email,
-                from_name=from_name,
-                attachments=resolved_attachments,
-            )
-        )
+    # Always use the Gmail-web faithful path (with or without attachments) so
+    # every draft carries the gmail_quote reply trail and web-faithful MIME.
+    draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
+    (
+        raw_message,
+        had_unresolved,
+        missing_scopes,
+        attached_count,
+        attachment_errors,
+    ) = await _build_web_compose_raw(
+        service,
+        people_service,
+        subject=draft_subject,
+        body=draft_body,
+        body_format=body_format,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        from_email=sender_email,
+        from_name=from_name,
+        thread_id=thread_id,
+        in_reply_to=in_reply_to,
+        references=references,
+        quote_reply=quote_original,
+        reply_target=target_reply,
+        auto_thread=False,
+        thread_names=draft_thread_names,
+        attachments=resolved_attachments or None,
+    )
+    name_note = (
+        _build_name_fallback_note(people_service is None, missing_scopes)
+        if had_unresolved
+        else ""
+    )
 
     requested_attachment_count = len(attachments or [])
     if requested_attachment_count > 0 and attached_count == 0:
