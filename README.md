@@ -284,7 +284,7 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | `GOOGLE_SERVICE_ACCOUNT_KEY_JSON` | | Inline service account JSON key (alternative to file) |
 | `DWD_ALLOWED_DOMAINS` | | Comma-separated domain allowlist for per-request impersonation (optional) |
 | **📧 Gmail** | | |
-| `GMAIL_SEND_TRANSPORT` | | `api` (default) or `smtp`. Selects how sent mail is transmitted — `smtp` sends the same raw MIME over `smtp.gmail.com:587` (XOAUTH2) instead of the Gmail API. Applies to new messages, replies, and forwards; drafts and all reads stay API-only. Opting into `smtp` automatically requests the `https://mail.google.com/` scope (re-authenticate to grant it). If that scope is absent, sending falls back to the API and the result notes the missing scope. Unknown values warn and fall back to `api`. **Fidelity caveat:** SMTP submission stamps your originating client IP and an `ESMTPSA` marker into the message's `Received` header and yields a non-Gmail `Message-ID` (`@mx.google.com`), so SMTP-sent mail is *distinguishable* from Gmail-web composition and exposes your IP to recipients. The default `api` transport does not — it is the faithful, indistinguishable path. Use `smtp` only when you specifically need SMTP submission and accept this trade-off. |
+| `GMAIL_SEND_TRANSPORT` | | `api` (default) or `smtp`. Selects how sent mail is transmitted — `smtp` sends the same raw MIME over `smtp.gmail.com:587` (XOAUTH2) instead of the Gmail API. Applies to new messages, replies, and forwards; drafts and all reads stay API-only. Opting into `smtp` automatically requests the `https://mail.google.com/` scope (re-authenticate to grant it). If that scope is absent, sending falls back to the API and the result notes the missing scope. Unknown values warn and fall back to `api`. **Fidelity caveat:** the message *body/MIME* is identical on both transports, but the server-stamped envelope differs — `smtp` exposes your client IP and gets a non-Gmail `Message-ID`. See [Send-transport message fingerprint](#send-transport-message-fingerprint) for the exact API-vs-SMTP-vs-web comparison before choosing `smtp`. |
 | **🔍 Custom Search** | | |
 | `GOOGLE_PSE_API_KEY` | | API key for Programmable Search Engine |
 | `GOOGLE_PSE_ENGINE_ID` | | Search Engine ID for PSE |
@@ -293,6 +293,29 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 
 </sub>
 </details>
+
+#### Send-transport message fingerprint
+
+`GMAIL_SEND_TRANSPORT` (`api` default, or `smtp`) only changes how a message is
+*submitted* — the message **body and MIME structure are byte-identical** on both
+transports (and faithful to Gmail's web composer). What differs is the envelope that
+Google's servers stamp on submission. Verified by sending real messages and inspecting
+the delivered raw headers:
+
+| Trait | Gmail web UI | `api` (default) | `smtp` |
+|---|---|---|---|
+| Body / MIME structure | reference | ✅ identical | ✅ identical |
+| `Message-ID` | `…@mail.gmail.com` | ✅ `…@mail.gmail.com` | ❌ `…@mx.google.com` |
+| Origin `Received` hop | `from mail-sor-NN.google.com` only | adds `from <project#> … by gmailapi.google.com` | adds `from <reverse-dns> ([your client IP])` + `ESMTPSA` |
+| Exposes your IP to recipients | no | no | **yes** (plus ISP via reverse-DNS) |
+| Reveals the send method | no | yes (names `gmailapi.google.com`) | yes (SMTP submission) |
+
+**Takeaways:** neither transport is byte-for-byte indistinguishable from the web UI in the
+`Received` headers — both add an origin hop the web composer doesn't. The `api` path is the
+closer match (it keeps the real `@mail.gmail.com` Message-ID and never exposes your IP),
+whereas `smtp` both rewrites the `Message-ID` domain and **leaks your originating IP/ISP** to
+every recipient. Prefer the default `api`; choose `smtp` only when you specifically need SMTP
+submission and accept these trade-offs.
 
 ---
 
