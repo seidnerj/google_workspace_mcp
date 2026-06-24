@@ -547,6 +547,308 @@ def test_assemble_mixed_inner_alternative_matches_assemble_alternative():
     assert closing_alt in mixed, "Closing alternative boundary must appear in mixed"
 
 
+# ---------------------------------------------------------------------------
+# assemble_web_message tests
+# ---------------------------------------------------------------------------
+
+_JPEG_DATA = b"\xff\xd8\xff\xe0" + b"\xab" * 40  # fake JPEG header + padding
+_PNG_INLINE = b"\x89PNG\r\n\x1a\n" + b"\xcd" * 30
+
+
+def test_web_message_no_inline_no_attach_matches_alternative():
+    """alternative-only path must produce byte-identical output to assemble_alternative."""
+    from gmail.gmail_web_mime import assemble_alternative, assemble_web_message
+
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Alt")]
+    plain = "hello"
+    html = "<div>hello</div>"
+    boundary = "000000000000aabbccddeeff0011"
+
+    via_alt = assemble_alternative(headers, plain, html, boundary)
+    via_web = assemble_web_message(
+        headers,
+        plain,
+        html,
+        inline_parts=None,
+        attachment_parts=None,
+        boundary_alt=boundary,
+    )
+    assert via_web == via_alt
+
+
+def test_web_message_inline_only_top_is_related():
+    """Inline-only: top container must be multipart/related."""
+    from gmail.gmail_web_mime import assemble_web_message
+    from tools.golden_skeleton import extract_skeleton
+
+    headers = [
+        ("From", "a@example.com"),
+        ("To", "b@example.com"),
+        ("Subject", "Inline"),
+    ]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "img.jpg",
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": "img001@example.com",
+            }
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/related"
+    alt = top["parts"][0]
+    assert alt["content_type"] == "multipart/alternative"
+    assert alt["parts"][0]["content_type"] == "text/plain"
+    assert alt["parts"][1]["content_type"] == "text/html"
+    inline = top["parts"][1]
+    assert inline["content_type"] == "image/jpeg"
+    assert inline["disposition"] == "inline"
+    assert inline["cte"] == "base64"
+
+
+def test_web_message_inline_only_cid_headers():
+    """Each inline part must have Content-ID with angle brackets and Content-Disposition: inline."""
+    from gmail.gmail_web_mime import assemble_web_message
+
+    cid_bare = "myimage@example.com"
+    cid_wrapped = "<otherid@example.com>"
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "CID")]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "a.jpg",
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": cid_bare,
+            },
+            {
+                "filename": "b.png",
+                "mime_type": "image/png",
+                "data": _PNG_INLINE,
+                "content_id": cid_wrapped,
+            },
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+    )
+    assert f"Content-ID: <{cid_bare}>" in raw
+    assert f"Content-ID: {cid_wrapped}" in raw
+    assert "Content-Disposition: inline" in raw
+
+
+def test_web_message_inline_only_base64_roundtrip():
+    """Round-trip decode of an inline part's base64 block returns original bytes."""
+    import base64 as _base64
+
+    from gmail.gmail_web_mime import assemble_web_message
+
+    data = bytes(range(80))  # >57 bytes so multi-line
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "RT")]
+    boundary_related = "000000000000bbbbbbbbbbbbbbbb"
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "img.png",
+                "mime_type": "image/png",
+                "data": data,
+                "content_id": "img@example.com",
+            }
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related=boundary_related,
+    )
+    crlf = "\r\n"
+    disp = 'Content-Disposition: inline; filename="img.png"'
+    disp_pos = raw.index(disp)
+    body_start = raw.index(crlf + crlf, disp_pos) + len(crlf + crlf)
+    next_boundary = f"{crlf}--{boundary_related}"
+    body_end = raw.index(next_boundary, body_start)
+    b64_block = raw[body_start:body_end]
+    decoded = _base64.b64decode(b64_block.replace(crlf, ""))
+    assert decoded == data
+
+
+def test_web_message_attach_only_matches_assemble_mixed():
+    """Attachments-only path must produce byte-identical output to assemble_mixed."""
+    from gmail.gmail_web_mime import assemble_mixed, assemble_web_message
+
+    headers = [
+        ("From", "a@example.com"),
+        ("To", "b@example.com"),
+        ("Subject", "Attach"),
+    ]
+    plain = "plain body"
+    html = "<div>html body</div>"
+    attachments = [
+        {"filename": "doc.pdf", "mime_type": "application/pdf", "data": _PDF_DATA}
+    ]
+    b_mixed = "000000000000aaaaaaaaaaaaaaaa"
+    b_alt = "000000000000bbbbbbbbbbbbbbbb"
+
+    via_mixed = assemble_mixed(headers, plain, html, attachments, b_mixed, b_alt)
+    via_web = assemble_web_message(
+        headers,
+        plain,
+        html,
+        inline_parts=None,
+        attachment_parts=attachments,
+        boundary_alt=b_alt,
+        boundary_mixed=b_mixed,
+    )
+    assert via_web == via_mixed
+
+
+def test_web_message_inline_and_attach_matches_golden():
+    """Inline + attachments must produce a mime_shape matching golden_inline.json."""
+    import json
+    import pathlib
+
+    from gmail.gmail_web_mime import assemble_web_message
+    from tools.golden_skeleton import extract_skeleton
+
+    golden = json.loads(
+        (pathlib.Path(__file__).parent / "fixtures" / "golden_inline.json").read_text()
+    )
+    shape = golden["mime_shape"]
+
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Both")]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "img.jpg",
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": "img1@example.com",
+            },
+        ],
+        attachment_parts=[
+            {
+                "filename": "report.pdf",
+                "mime_type": "application/pdf",
+                "data": _PDF_DATA,
+            },
+        ],
+        boundary_alt="000000000000cccccccccccccccc",
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+        boundary_mixed="000000000000aaaaaaaaaaaaaaaa",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+
+    # Top-level: multipart/mixed
+    assert top["content_type"] == shape["content_type"]  # multipart/mixed
+
+    # First child: multipart/related
+    related = top["parts"][0]
+    assert (
+        related["content_type"] == shape["parts"][0]["content_type"]
+    )  # multipart/related
+
+    # First child of related: multipart/alternative
+    alt = related["parts"][0]
+    assert alt["content_type"] == shape["parts"][0]["parts"][0]["content_type"]
+    assert alt["parts"][0]["content_type"] == "text/plain"
+    assert alt["parts"][1]["content_type"] == "text/html"
+
+    # Second child of related: inline image
+    img = related["parts"][1]
+    assert img["content_type"] == "image/jpeg"
+    assert img["disposition"] == "inline"
+    assert img["cte"] == "base64"
+
+    # Second child of mixed: attachment (content_type depends on what we pass, not the golden fixture)
+    att = top["parts"][1]
+    assert att["disposition"] == shape["parts"][1]["disposition"]  # "attachment"
+    assert att["cte"] == shape["parts"][1]["cte"]  # "base64"
+
+
+def test_web_message_inline_filename_escaping():
+    """Filenames with double-quotes and spaces in inline parts are RFC 2045 escaped."""
+    from gmail.gmail_web_mime import assemble_web_message
+
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Esc")]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": 'my "photo" 1.jpg',
+                "mime_type": "image/jpeg",
+                "data": _JPEG_DATA,
+                "content_id": "x@example.com",
+            }
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related="000000000000bbbbbbbbbbbbbbbb",
+    )
+    assert 'name="my \\"photo\\" 1.jpg"' in raw
+    assert 'filename="my \\"photo\\" 1.jpg"' in raw
+    # Unescaped form must not appear
+    assert 'name="my "photo" 1.jpg"' not in raw
+
+
+def test_web_message_inline_base64_line_length():
+    """Every base64 line in an inline part must be ≤76 chars; no blank line before next boundary."""
+    from gmail.gmail_web_mime import assemble_web_message
+
+    data = bytes(range(200))
+    boundary_related = "000000000000bbbbbbbbbbbbbbbb"
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Lines")]
+    raw = assemble_web_message(
+        headers,
+        "plain",
+        "<div>html</div>",
+        inline_parts=[
+            {
+                "filename": "big.png",
+                "mime_type": "image/png",
+                "data": data,
+                "content_id": "big@example.com",
+            }
+        ],
+        attachment_parts=None,
+        boundary_alt="000000000000aaaaaaaaaaaaaaaa",
+        boundary_related=boundary_related,
+    )
+    crlf = "\r\n"
+    disp = 'Content-Disposition: inline; filename="big.png"'
+    disp_pos = raw.index(disp)
+    body_start = raw.index(crlf + crlf, disp_pos) + len(crlf + crlf)
+    next_boundary = f"{crlf}--{boundary_related}"
+    body_end = raw.index(next_boundary, body_start)
+    b64_block = raw[body_start:body_end]
+
+    lines = b64_block.split(crlf)
+    for line in lines:
+        assert len(line) <= 76, f"base64 line exceeds 76 chars: {line!r}"
+    assert not b64_block.endswith(crlf), (
+        "base64 block must not end with blank line before boundary"
+    )
+    assert lines[-1] != "", "Last base64 line before boundary must not be empty"
+
+
 def test_assemble_mixed_base64_multiline():
     """200-byte attachment: base64 spans multiple lines; no empty line before next boundary."""
     import base64 as _base64
