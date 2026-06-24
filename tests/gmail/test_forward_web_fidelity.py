@@ -476,3 +476,113 @@ def test_prepare_web_with_attachments_produces_mixed():
     assert top["parts"][0]["content_type"] == "multipart/alternative"
     assert top["parts"][1]["content_type"] == "application/pdf"
     assert top["parts"][1]["disposition"] == "attachment"
+
+
+# ---------------------------------------------------------------------------
+# Note placement tests (HTML-format note and no-note/no-HTML-original)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_forward_html_note_placement():
+    """HTML-format note appears before the gmail_quote_container div in HTML and
+    before the forwarded separator in plain."""
+    from email import message_from_bytes
+
+    msg = _create_mock_message(
+        text_body="Lorem ipsum original plain.",
+        html_body="<div>Lorem ipsum original html.</div>",
+    )
+    svc = _create_mock_service(msg)
+
+    await _forward_gmail_message_impl(
+        service=svc,
+        message_id="msg_note_html",
+        to="recipient@example.com",
+        forward_message="<b>see below</b>",
+        forward_message_format="html",
+        user_google_email="me@example.com",
+    )
+
+    raw = _decode_sent_raw(svc)
+
+    # HTML part: note before gmail_quote_container
+    parsed = message_from_bytes(raw)
+    # Walk to find HTML part
+    html_payload = None
+    for part in parsed.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            html_payload = payload.decode("utf-8", errors="replace") if payload else ""
+            break
+    assert html_payload is not None, "No text/html part found"
+    note_pos = html_payload.find("<b>see below</b>")
+    container_pos = html_payload.find('class="gmail_quote gmail_quote_container"')
+    assert note_pos != -1, "Note HTML not found in HTML part"
+    assert container_pos != -1, "gmail_quote_container not found in HTML part"
+    assert note_pos < container_pos, "Note must appear before gmail_quote_container"
+
+    # Plain part: note text before forwarded separator
+    plain_payload = None
+    for part in parsed.walk():
+        if part.get_content_type() == "text/plain":
+            payload = part.get_payload(decode=True)
+            plain_payload = payload.decode("utf-8", errors="replace") if payload else ""
+            break
+    assert plain_payload is not None, "No text/plain part found"
+    note_text_pos = plain_payload.find("see below")
+    sep_pos = plain_payload.find("---------- Forwarded message")
+    assert note_text_pos != -1, "Extracted note text not found in plain part"
+    assert sep_pos != -1, "Forwarded separator not found in plain part"
+    assert note_text_pos < sep_pos, "Note text must appear before forwarded separator"
+
+
+@pytest.mark.asyncio
+async def test_forward_no_note_plain_only_original():
+    """No note + plain-only original → valid multipart/alternative with both parts;
+    HTML contains gmail_quote_container with no leading note div."""
+    from email import message_from_bytes
+
+    msg = _create_mock_message(
+        text_body="Just plain body. No html original.",
+        html_body=None,
+    )
+    svc = _create_mock_service(msg)
+
+    await _forward_gmail_message_impl(
+        service=svc,
+        message_id="msg_no_note_plain_only",
+        to="recipient@example.com",
+        user_google_email="me@example.com",
+    )
+
+    raw = _decode_sent_raw(svc)
+    sk = _skeleton(raw)
+
+    # MIME shape: multipart/alternative
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/alternative"
+    assert any(p["content_type"] == "text/plain" for p in top["parts"])
+    assert any(p["content_type"] == "text/html" for p in top["parts"])
+
+    # HTML probes: gmail_quote_container present, no blockquote
+    probes = sk["html_probes"]
+    assert probes["has_gmail_quote_container"] is True
+    assert probes["has_blockquote_gmail_quote"] is False
+    assert probes["has_forwarded_literal"] is True
+
+    # HTML part: gmail_quote_container present and no note div immediately before it
+    parsed = message_from_bytes(raw)
+    html_payload = None
+    for part in parsed.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            html_payload = payload.decode("utf-8", errors="replace") if payload else ""
+            break
+    assert html_payload is not None
+    assert 'class="gmail_quote gmail_quote_container"' in html_payload
+    # No-note path: the outer wrapper must start with <br> (no note div injected before
+    # the forwarded container).  Structure: '<div dir="ltr"><br><div ...'
+    assert html_payload.startswith('<div dir="ltr"><br>'), (
+        f"Expected no-note HTML to start with outer wrapper + bare <br>, got: {html_payload[:80]!r}"
+    )

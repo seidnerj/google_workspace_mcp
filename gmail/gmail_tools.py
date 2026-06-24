@@ -3062,9 +3062,9 @@ async def _forward_gmail_message_impl(
         orig_html=orig_html,
     )
     if note_html:
-        forward_html = f'<div dir="ltr">{note_html}<br><br>{fwd_html_container}</div>'
+        forward_html = new_message_html(f"{note_html}<br><br>{fwd_html_container}")
     else:
-        forward_html = f'<div dir="ltr"><br>{fwd_html_container}</div>'
+        forward_html = new_message_html(f"<br>{fwd_html_container}")
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
