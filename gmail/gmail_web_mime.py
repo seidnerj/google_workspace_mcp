@@ -266,23 +266,77 @@ def _qp_encode(text: str) -> str:
     return encoded.decode("ascii")
 
 
+def choose_cte(text: str) -> str:
+    """Choose Content-Transfer-Encoding for a text body part.
+
+    Returns ``"base64"`` if base64 encoding of the UTF-8 bytes is strictly
+    smaller than quoted-printable; otherwise returns ``"quoted-printable"``.
+
+    This is a size-minimizing rule that approximates Gmail's per-part CTE
+    selection: mostly-ASCII/Latin bodies favour QP (since base64 inflates
+    ASCII by ~33 %), while heavily non-ASCII bodies (e.g. Hebrew, CJK) favour
+    base64 because QP expands every non-ASCII byte to ``=XX`` (3 bytes each).
+    QP wins all ties and the all-ASCII case.
+
+    The computation is O(len(text)) with no materialisation of full output —
+    just length arithmetic on the UTF-8 byte sequence.
+    """
+    raw = text.encode("utf-8")
+    if not raw:
+        return "quoted-printable"
+
+    # --- QP size estimate ---
+    # quopri encodes each byte that is not a printable ASCII safe-char as =XX
+    # (3 bytes).  Safe bytes are kept as-is (1 byte), but long lines get a
+    # soft-wrap ``=\r\n`` (3 bytes) every 75 content bytes.  We use a conservative
+    # per-byte count: non-printable/non-safe → 3, otherwise 1; then add ~4 %
+    # overhead for soft line-wraps (worst case one wrap per 75 bytes → 3 extra).
+    # In practice the dominant factor is the =XX expansion, so this is accurate
+    # enough to pick the same winner as computing `len(quopri.encodestring(raw))`.
+    _QP_SAFE = frozenset(b" \t\r\n" + bytes(range(33, 127))) - {ord("="), ord("_")}
+    qp_bytes = sum(1 if b in _QP_SAFE else 3 for b in raw)
+    # Add soft-wrap overhead: one `=\r\n` per 75 output bytes of content.
+    qp_size = qp_bytes + (qp_bytes // 75) * 3
+
+    # --- base64 size estimate ---
+    # base64 expands 3 raw bytes → 4 chars; lines are wrapped at 76 cols with
+    # CRLF (2 bytes).  Padding rounds up to the next multiple of 3.
+    b64_chars = ((len(raw) + 2) // 3) * 4
+    b64_lines = (b64_chars + 75) // 76  # number of CRLF line endings
+    b64_size = b64_chars + b64_lines * 2
+
+    return "base64" if b64_size < qp_size else "quoted-printable"
+
+
+def _b64_text(text: str) -> str:
+    """Base64-encode a text string (UTF-8) with CRLF-wrapped 76-col lines."""
+    return _b64_crlf(text.encode("utf-8"))
+
+
 def _alternative_parts(plain_text: str, html_text: str, boundary: str) -> str:
     """Return the body of a ``multipart/alternative`` subtree (no top-level headers).
 
-    Emits the two body parts (text/plain + text/html, UTF-8 quoted-printable)
-    bounded by ``boundary``, suitable for use both as a standalone message body
-    and as a child part within a ``multipart/mixed`` message.
+    Emits the two body parts (text/plain + text/html, UTF-8) bounded by
+    ``boundary``, suitable for use both as a standalone message body and as a
+    child part within a ``multipart/mixed`` message.
+
+    The Content-Transfer-Encoding for each part is chosen independently via
+    :func:`choose_cte`: mostly-ASCII/Latin bodies use ``quoted-printable``
+    (preserving existing behaviour byte-for-byte); heavily non-ASCII bodies
+    (e.g. Hebrew, CJK) switch to ``base64`` where it is more compact.
     """
     crlf = "\r\n"
 
     def _part(content_type: str, body: str) -> str:
+        cte = choose_cte(body)
+        encoded = _qp_encode(body) if cte == "quoted-printable" else _b64_text(body)
         return crlf.join(
             [
                 f"--{boundary}",
                 f'Content-Type: {content_type}; charset="UTF-8"',
-                "Content-Transfer-Encoding: quoted-printable",
+                f"Content-Transfer-Encoding: {cte}",
                 "",
-                _qp_encode(body),
+                encoded,
             ]
         )
 
@@ -305,9 +359,11 @@ def assemble_alternative(
     The ``Content-Type`` header for the top-level multipart is appended here so
     its boundary always matches ``boundary``.
 
-    Both body parts use ``charset="UTF-8"`` (uppercase, double-quoted) and
-    ``Content-Transfer-Encoding: quoted-printable``. Returns the message as a
-    string with CRLF separators (ready for base64url encoding).
+    Both body parts use ``charset="UTF-8"`` (uppercase, double-quoted).  The
+    ``Content-Transfer-Encoding`` for each part is chosen independently via
+    :func:`choose_cte` — ``quoted-printable`` for ASCII/Latin content,
+    ``base64`` for heavily non-ASCII content (e.g. Hebrew, CJK).  Returns the
+    message as a string with CRLF separators (ready for base64url encoding).
     """
     crlf = "\r\n"
     lines: List[str] = [f"{name}: {value}" for name, value in headers]
