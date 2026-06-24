@@ -435,8 +435,11 @@ def test_assemble_mixed_multiple_attachments_in_order():
     assert parts[2]["disposition"] == "attachment"
 
 
-def test_assemble_mixed_filename_with_space_and_quote():
-    """Filenames with spaces and quotes appear correctly in Content-Disposition."""
+def test_assemble_mixed_filename_quote_escaping_discriminating():
+    """Filenames with double-quotes are RFC 2045 escaped in BOTH name= and filename= params.
+
+    This test FAILS if escaping is absent (old behaviour) and PASSES only after the fix.
+    """
     from gmail.gmail_web_mime import assemble_mixed
 
     raw = assemble_mixed(
@@ -445,7 +448,7 @@ def test_assemble_mixed_filename_with_space_and_quote():
         "<div>html</div>",
         [
             {
-                "filename": 'my file "final".pdf',
+                "filename": 'my "final".pdf',
                 "mime_type": "application/pdf",
                 "data": b"x",
             }
@@ -453,16 +456,52 @@ def test_assemble_mixed_filename_with_space_and_quote():
         "000000000000aaaaaaaaaaaaaaaa",
         "000000000000bbbbbbbbbbbbbbbb",
     )
-    assert (
-        'filename="my file \\"final\\".pdf"' in raw
-        or 'filename="my file "final".pdf"' in raw
+    # Both Content-Type name= and Content-Disposition filename= must use escaped quotes.
+    assert 'name="my \\"final\\".pdf"' in raw, (
+        "Content-Type name= param must escape inner double-quotes"
     )
-    # At minimum, the filename string appears somewhere in the attachment headers
-    assert "my file" in raw
+    assert 'filename="my \\"final\\".pdf"' in raw, (
+        "Content-Disposition filename= param must escape inner double-quotes"
+    )
+    # The malformed (unescaped) form must NOT appear.
+    assert 'name="my "final".pdf"' not in raw, (
+        "Unescaped double-quote in name= would be malformed RFC 2045"
+    )
+
+
+def test_assemble_mixed_filename_backslash_escaping():
+    """Filenames with backslashes are RFC 2045 escaped (backslash doubled) in BOTH params."""
+    from gmail.gmail_web_mime import assemble_mixed
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Filename")],
+        "plain",
+        "<div>html</div>",
+        [
+            {
+                "filename": "a\\b.pdf",
+                "mime_type": "application/pdf",
+                "data": b"x",
+            }
+        ],
+        "000000000000aaaaaaaaaaaaaaaa",
+        "000000000000bbbbbbbbbbbbbbbb",
+    )
+    # Backslash must be doubled in both params.
+    assert 'name="a\\\\b.pdf"' in raw, (
+        "Content-Type name= param must double-escape backslashes"
+    )
+    assert 'filename="a\\\\b.pdf"' in raw, (
+        "Content-Disposition filename= param must double-escape backslashes"
+    )
 
 
 def test_assemble_mixed_inner_alternative_matches_assemble_alternative():
-    """Inner alternative subtree body must equal what assemble_alternative produces."""
+    """Inner alternative subtree body must equal what assemble_alternative produces.
+
+    Asserts BOTH the text/plain AND text/html part bodies appear verbatim in the
+    mixed message, matching the entire multipart/alternative child block.
+    """
     from gmail.gmail_web_mime import assemble_alternative, assemble_mixed
 
     plain_text = "hello world"
@@ -484,15 +523,77 @@ def test_assemble_mixed_inner_alternative_matches_assemble_alternative():
         boundary_alt,
     )
 
-    # The alternative child's plain+html QP-encoded bodies must appear in mixed
-    # Extract the QP bodies from standalone (they appear between the boundary markers)
     crlf = "\r\n"
-    # Get the plain-part QP body from standalone alternative
     plain_marker = f"--{boundary_alt}{crlf}Content-Type: text/plain"
     html_marker = f"--{boundary_alt}{crlf}Content-Type: text/html"
+    closing_alt = f"--{boundary_alt}--"
+
+    # Extract plain part block (from plain_marker up to html_marker)
     alt_plain_start = alt_standalone.index(plain_marker)
     alt_html_start = alt_standalone.index(html_marker)
     alt_plain_body = alt_standalone[alt_plain_start:alt_html_start]
     assert alt_plain_body in mixed, (
         "Plain part body from alt must appear verbatim in mixed"
     )
+
+    # Extract html part block (from html_marker up to closing --)
+    alt_closing_start = alt_standalone.index(closing_alt)
+    alt_html_body = alt_standalone[alt_html_start:alt_closing_start]
+    assert alt_html_body in mixed, (
+        "HTML part body from alt must appear verbatim in mixed"
+    )
+
+    # The closing alt boundary must also appear in mixed
+    assert closing_alt in mixed, "Closing alternative boundary must appear in mixed"
+
+
+def test_assemble_mixed_base64_multiline():
+    """200-byte attachment: base64 spans multiple lines; no empty line before next boundary."""
+    import base64 as _base64
+
+    from gmail.gmail_web_mime import assemble_mixed
+
+    data = bytes(range(200))
+    boundary_mixed = "000000000000aaaaaaaaaaaaaaaa"
+    boundary_alt = "000000000000bbbbbbbbbbbbbbbb"
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Big")],
+        "plain",
+        "<div>html</div>",
+        [
+            {
+                "filename": "big.bin",
+                "mime_type": "application/octet-stream",
+                "data": data,
+            }
+        ],
+        boundary_mixed,
+        boundary_alt,
+    )
+
+    crlf = "\r\n"
+    # Locate attachment part body (after the blank line following Content-Disposition)
+    disp_header = 'Content-Disposition: attachment; filename="big.bin"'
+    disp_pos = raw.index(disp_header)
+    # Body starts after the header block's blank line (CRLFCRLF)
+    body_start = raw.index(crlf + crlf, disp_pos) + len(crlf + crlf)
+    # Body ends just before the next boundary line
+    next_boundary = f"{crlf}--{boundary_mixed}"
+    body_end = raw.index(next_boundary, body_start)
+    b64_block = raw[body_start:body_end]
+
+    # (a) round-trip decodes to original bytes
+    decoded = _base64.b64decode(b64_block.replace(crlf, ""))
+    assert decoded == data, "base64 block must decode back to original bytes"
+
+    # (b) every line is ≤ 76 chars (excluding CRLF)
+    lines = b64_block.split(crlf)
+    for line in lines:
+        assert len(line) <= 76, f"base64 line exceeds 76 chars: {line!r}"
+
+    # (c) no empty line between last base64 line and the following boundary
+    assert not b64_block.endswith(crlf), (
+        "base64 block must not end with a blank line before the next boundary"
+    )
+    assert lines[-1] != "", "Last base64 line before boundary must not be empty"

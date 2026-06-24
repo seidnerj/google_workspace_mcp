@@ -357,15 +357,18 @@ def assemble_mixed(
         filename: str = att["filename"]
         mime_type: str = att["mime_type"]
         data: bytes = att["data"]
+        # RFC 2045 quoted-string escaping: backslash first, then double-quote.
+        escaped_fn = filename.replace("\\", "\\\\").replace('"', '\\"')
         b64 = base64.encodebytes(data).decode("ascii")
-        # encodebytes wraps at 76 cols with newlines; normalise to CRLF.
-        b64_crlf = b64.replace("\n", crlf).rstrip(crlf)
+        # encodebytes wraps at 76 cols with a trailing newline; strip it so there
+        # is no empty line between the payload and the next boundary delimiter.
+        b64_crlf = b64.rstrip("\n").replace("\n", crlf)
         part = crlf.join(
             [
                 f"--{boundary_mixed}",
-                f'Content-Type: {mime_type}; name="{filename}"',
+                f'Content-Type: {mime_type}; name="{escaped_fn}"',
                 "Content-Transfer-Encoding: base64",
-                f'Content-Disposition: attachment; filename="{filename}"',
+                f'Content-Disposition: attachment; filename="{escaped_fn}"',
                 "",
                 b64_crlf,
             ]
