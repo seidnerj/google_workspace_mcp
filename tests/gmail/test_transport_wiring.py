@@ -500,3 +500,99 @@ class TestDraftIsolation:
         svc.users.return_value.drafts.return_value.create.assert_called()
         svc.users.return_value.messages.return_value.send.assert_not_called()
         assert "Draft" in result
+
+
+# ---------------------------------------------------------------------------
+# 6. API byte-identity WITH attachments
+# ---------------------------------------------------------------------------
+
+
+class TestApiPathWithAttachments:
+    @pytest.mark.asyncio
+    async def test_send_result_byte_identical_with_attachments(self, monkeypatch):
+        """env=api with attachments: result must be exactly
+        'Email sent with 1 attachment(s)! Message ID: <id>'."""
+        import base64 as _base64
+
+        _patch_transport(monkeypatch, "api", None, "")
+
+        svc = _gmail_service(sent_id="attach-001")
+
+        # A tiny valid PNG (1x1 pixel)
+        png_b64 = _base64.b64encode(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00"
+            b"\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+            b"\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        ).decode()
+
+        result = await _unwrap(send_gmail_message)(
+            service=svc,
+            people_service=_people_service_empty(),
+            user_google_email=_USER,
+            to="carol@example.com",
+            subject="Attachment test",
+            body="See attachment",
+            include_signature=False,
+            attachments=[{"content": png_b64, "filename": "pixel.png"}],
+        )
+
+        assert result == "Email sent with 1 attachment(s)! Message ID: attach-001"
+
+
+# ---------------------------------------------------------------------------
+# 7. Forward SMTP-fallback keeps Bcc header (missing scope → API path)
+# ---------------------------------------------------------------------------
+
+
+class TestForwardSmtpFallbackKeepsBcc:
+    @pytest.mark.asyncio
+    async def test_forward_api_fallback_keeps_bcc_header(self, monkeypatch):
+        """Forward: SMTP configured but scope missing → API path, Bcc header kept."""
+        monkeypatch.setattr(transport_mod, "send_via_smtp", AsyncMock())
+        _patch_transport(
+            monkeypatch, "api", _narrow_creds(), " Note: SMTP scope missing"
+        )
+
+        svc = _forward_service(sent_id="fwd-fallback-001")
+        result = await _forward_gmail_message_impl(
+            service=svc,
+            message_id="orig-fwd-fallback",
+            to="carol@example.com",
+            bcc="dave@example.com",
+            user_google_email=_USER,
+        )
+
+        raw = _decode_raw_sent(svc)
+        msg = message_from_bytes(raw)
+        assert msg["Bcc"] is not None, (
+            "Forward API fallback must keep Bcc header in raw MIME"
+        )
+        assert "dave@example.com" in msg["Bcc"]
+        assert "Message ID:" in result
+        assert "SMTP scope missing" in result
+
+
+# ---------------------------------------------------------------------------
+# 8. Non-web _prepare_gmail_message with include_bcc_header=False
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareGmailMessageNonWebBccGate:
+    def test_non_web_no_bcc_header_when_include_bcc_header_false(self):
+        """web_compose=False + include_bcc_header=False must NOT add Bcc header."""
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        raw_b64, _thread, _count, _errors = _prepare_gmail_message(
+            subject="Bcc gate test",
+            body="Body text",
+            to="carol@example.com",
+            bcc="dave@example.com",
+            web_compose=False,
+            include_bcc_header=False,
+        )
+        raw = base64.urlsafe_b64decode(raw_b64)
+        msg = message_from_bytes(raw)
+        assert msg["Bcc"] is None, (
+            f"Bcc header must be absent when include_bcc_header=False; got: {msg['Bcc']}"
+        )

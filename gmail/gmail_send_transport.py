@@ -94,9 +94,9 @@ async def dispatch_transmit(
     bcc: list[str] | None,
     subject: str,
     user_google_email: str,
-    action_label: str = "Email sent",
-    attachment_info: str = "",
-    trailing_note: str = "",
+    action_label: str,
+    attachment_info: str,
+    trailing_note: str,
 ) -> str:
     """Transmit a pre-encoded RFC 822 message via the resolved transport.
 
@@ -164,8 +164,8 @@ async def _dispatch_smtp(
     subject: str,
     user_google_email: str,
     action_label: str,
-    attachment_info: str = "",
-    trailing_note: str = "",
+    attachment_info: str,
+    trailing_note: str,
 ) -> str:
     from google.auth.transport.requests import Request  # local import to avoid cycles
 

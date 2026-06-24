@@ -128,6 +128,9 @@ class TestDispatchTransmitApiPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         assert "Message ID: abc123" in result
@@ -151,6 +154,9 @@ class TestDispatchTransmitApiPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         assert "Message ID: xyz" in result
@@ -172,6 +178,9 @@ class TestDispatchTransmitApiPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
         # Check that the send body included threadId
         send_call = service.users().messages().send.call_args
@@ -207,6 +216,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         assert "via SMTP!" in result
@@ -234,6 +246,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         assert "via SMTP!" in result
@@ -260,6 +275,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         assert "via SMTP!" in result
@@ -294,6 +312,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         # Must not raise; must degrade to best-effort string
@@ -325,6 +346,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=["dave@example.com"],
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         env = captured["envelope"]
@@ -361,6 +385,9 @@ class TestDispatchTransmitSmtpPath:
             bcc=None,
             subject="hi",
             user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
         )
 
         # creds.refresh is a MagicMock attribute — assert it was called once.

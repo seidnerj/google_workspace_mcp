@@ -1819,7 +1819,7 @@ def _prepare_gmail_message(
         message["To"] = to
     if cc:
         message["Cc"] = cc
-    if bcc:
+    if bcc and include_bcc_header:
         message["Bcc"] = bcc
 
     # Add reply headers for threading
