@@ -46,10 +46,10 @@ _MON = [
 def gmail_boundary() -> str:
     """Return a Gmail-style multipart boundary.
 
-    Matches ``^0{12}[0-9a-f]{16,18}$`` -- the literal ``000000000000`` prefix
-    followed by 16-18 random lowercase hex characters.
+    Matches ``^0{12}[0-9a-f]{16}$`` -- the literal ``000000000000`` prefix
+    followed by exactly 16 random lowercase hex characters (total length 28).
     """
-    # 8 random bytes -> 16 hex chars (within the 16-18 allowed range).
+    # 8 random bytes -> exactly 16 hex chars.
     return "000000000000" + secrets.token_hex(8)
 
 

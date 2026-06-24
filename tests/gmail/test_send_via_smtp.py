@@ -40,6 +40,14 @@ class FakeSMTP:
         return {}
 
 
+@pytest.fixture(autouse=True)
+def _reset_fake_smtp_instances():
+    """Clear the shared instance registry between tests to avoid cross-test bleed."""
+    FakeSMTP.instances = []
+    yield
+    FakeSMTP.instances = []
+
+
 @pytest.mark.asyncio
 async def test_send_via_smtp_xoauth2(monkeypatch):
     monkeypatch.setattr(t.smtplib, "SMTP", FakeSMTP)
@@ -53,6 +61,12 @@ async def test_send_via_smtp_xoauth2(monkeypatch):
     s = FakeSMTP.instances[-1]
     assert (s.host, s.port) == ("smtp.gmail.com", 587)
     assert "starttls" in s.cmds
+    # STARTTLS must precede AUTH — XOAUTH2 credentials may never cross the wire
+    # before the channel is encrypted.
+    auth_index = next(
+        i for i, c in enumerate(s.cmds) if isinstance(c, tuple) and c[1] == "AUTH"
+    )
+    assert s.cmds.index("starttls") < auth_index
     auth = next(c for c in s.cmds if isinstance(c, tuple) and c[1] == "AUTH")
     assert auth[2].startswith("XOAUTH2 ")
     decoded = base64.b64decode(auth[2].split(" ", 1)[1]).decode()

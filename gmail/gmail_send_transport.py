@@ -212,6 +212,10 @@ async def _lookup_message_id(
 ) -> str:
     """Return the message-id fragment to append; never raises."""
     try:
+        # Defensive only: via resolve_effective_transport an SMTP send always
+        # holds MAIL_GOOGLE_COM_SCOPE, which implies GMAIL_READONLY_SCOPE in the
+        # scope hierarchy, so this branch is unreachable on the normal path. It
+        # guards direct dispatch_transmit callers with narrow-scope creds.
         if not has_required_scopes(creds.scopes, [GMAIL_READONLY_SCOPE]):
             missing = [GMAIL_READONLY_SCOPE]
             missing_str = ", ".join(missing)

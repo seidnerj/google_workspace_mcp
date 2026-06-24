@@ -7,6 +7,8 @@ Separated from service_decorator.py to avoid circular imports.
 
 import logging
 
+from core.config import get_send_transport as _get_send_transport
+
 logger = logging.getLogger(__name__)
 
 # Global variable to store enabled tools (set by main.py)
@@ -176,8 +178,6 @@ GMAIL_SCOPES = [
 
 # The broad full-mailbox scope is only requested when the deployment opted into SMTP.
 # SMTP auth requires https://mail.google.com/ rather than the narrower gmail.* scopes.
-from core.config import get_send_transport as _get_send_transport  # noqa: E402
-
 if _get_send_transport() == "smtp":
     GMAIL_SCOPES.append(MAIL_GOOGLE_COM_SCOPE)
 
