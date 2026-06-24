@@ -528,3 +528,145 @@ def test_split_handles_content_base64():
     assert count == 1
     assert errors == []
     assert attach_parts[0]["data"] == _FAKE_PDF
+
+
+# ---------------------------------------------------------------------------
+# 6. Non-reply send WITH attachment must NOT get a quote trail
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_non_reply_with_attachment_no_quote_trail():
+    """A brand-new send (no thread_id) with a regular attachment must NOT
+    contain a gmail_quote_container reply trail in the HTML body, and the
+    top-level MIME structure must be multipart/mixed.
+    """
+    gmail = _gmail_service()
+    people = _people_service()
+
+    result = await _unwrap(send_gmail_message)(
+        service=gmail,
+        people_service=people,
+        user_google_email="bob@example.com",
+        to="carol@example.com",
+        subject="Hello",
+        body="New message with attachment.",
+        attachments=[
+            {
+                "filename": "report.pdf",
+                "content": _FAKE_PDF_B64,
+                "mime_type": "application/pdf",
+            }
+        ],
+        include_signature=False,
+    )
+
+    assert "Email sent" in result
+    raw = _raw_sent(gmail)
+
+    # Top-level must be multipart/mixed (has regular attachment)
+    sk = _skeleton(raw)
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/mixed"
+
+    # HTML must NOT contain any reply quote trail
+    html = _html_of(raw)
+    assert "gmail_quote_container" not in html, (
+        "Non-reply send must not include a gmail_quote_container in HTML"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Draft with all-erroring attachments raises UserInputError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_draft_raises_when_all_attachments_error():
+    """UserInputError must be raised when all resolved attachments have errors
+    in the draft path (mirrors test_send_reply_raises_when_all_attachments_error).
+    """
+    gmail = _gmail_service()
+    people = _people_service()
+
+    with pytest.raises(UserInputError, match="No valid attachments were added"):
+        await _unwrap(draft_gmail_message)(
+            service=gmail,
+            people_service=people,
+            user_google_email="bob@example.com",
+            to="alice@example.com",
+            subject="Broken draft",
+            body="See attached.",
+            attachments=[
+                {
+                    "filename": "broken.pdf",
+                    "error": "fetch failed: connection timeout",
+                    "error_type": "NetworkError",
+                }
+            ],
+            include_signature=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. Sole content attachment with missing filename → non-empty error Detail
+# ---------------------------------------------------------------------------
+
+
+def test_split_missing_filename_on_content_attachment_records_error():
+    """A content-based attachment with no filename must be recorded in
+    attachment_errors (not silently dropped), and the error must mention
+    'missing filename' so the caller's UserInputError Detail is non-empty.
+    """
+    inline_parts, attach_parts, count, errors = _split_resolved_attachments(
+        [
+            {
+                "content": _FAKE_PDF_B64,
+                # intentionally no "filename" key
+                "mime_type": "application/pdf",
+            }
+        ]
+    )
+    assert count == 0
+    assert len(errors) == 1, "Expected exactly one error entry"
+    assert errors[0], "Error string must be non-empty"
+    assert "filename" in errors[0].lower(), (
+        f"Error must mention 'filename', got: {errors[0]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_missing_filename_gives_nonempty_details():
+    """When the only attachment is a content-based one with no filename,
+    UserInputError must be raised AND its message must contain a non-empty
+    Details section (proving fix #1: the silent-skip path now records errors).
+    """
+    gmail = _gmail_service()
+    people = _people_service()
+
+    with pytest.raises(UserInputError) as exc_info:
+        await _unwrap(send_gmail_message)(
+            service=gmail,
+            people_service=people,
+            user_google_email="bob@example.com",
+            to="alice@example.com",
+            subject="Missing filename test",
+            body="See attached.",
+            attachments=[
+                {
+                    "content": _FAKE_PDF_B64,
+                    # intentionally no "filename" key
+                    "mime_type": "application/pdf",
+                }
+            ],
+            include_signature=False,
+        )
+
+    msg = str(exc_info.value)
+    assert "No valid attachments were added" in msg
+    assert "Details:" in msg, (
+        f"UserInputError must contain 'Details:' with a reason, got: {msg!r}"
+    )
+    # The Details section must not be empty — something after "Details: "
+    details_part = msg.split("Details:", 1)[1].strip()
+    assert details_part, f"Details section must not be empty, got: {msg!r}"

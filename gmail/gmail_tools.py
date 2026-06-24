@@ -1383,6 +1383,9 @@ def _split_resolved_attachments(
             elif content_base64:
                 if not filename:
                     logger.warning("Skipping attachment: missing filename")
+                    attachment_errors.append(
+                        "attachment: missing filename (content provided without a filename)"
+                    )
                     continue
                 file_data = base64.b64decode(content_base64)
                 if not mime_type:
@@ -1403,6 +1406,9 @@ def _split_resolved_attachments(
             else:
                 logger.warning(
                     "Skipping attachment: no data, _resolved_bytes, content, or path"
+                )
+                attachment_errors.append(
+                    f"{filename or 'attachment'}: no content, path, or data provided"
                 )
                 continue
 
