@@ -292,7 +292,7 @@ async def test_forward_plain_original_with_html_note():
     body = get_body_text(sent, subtype="html")
     assert "<b>Heads up</b>" in body
     # The plain-text original is escaped and newline-converted into the HTML body.
-    assert "Line one<br/>Line two" in body
+    assert "Line one<br>Line two" in body
 
 
 @pytest.mark.asyncio

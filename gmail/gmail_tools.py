@@ -61,13 +61,15 @@ from gmail.gmail_helpers import (
     GMAIL_METADATA_HEADERS,
     RAW_BODY_TRUNCATE_LIMIT,
     _analyze_thread_ownership_impl,
-    _build_forward_content,
     _is_benign_signature_http_error,
     _parse_date_header,
     _signature_fetch_tool_error,
 )
 from gmail.gmail_web_mime import (
     assemble_alternative,
+    assemble_mixed,
+    build_forwarded_container_html,
+    build_forwarded_plain,
     build_quote_container_html,
     build_quote_plain,
     encode_raw,
@@ -1524,14 +1526,21 @@ def _prepare_gmail_message_web(
     from_email: Optional[str] = None,
     from_name: Optional[str] = None,
     date_header: Optional[str] = None,
+    attachments: Optional[List[Dict]] = None,
 ) -> str:
-    """Assemble a Gmail-web faithful multipart/alternative message.
+    """Assemble a Gmail-web faithful message.
 
     ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
     text/html parts (including any reply quote trail) built by the async caller.
     Returns the base64url-encoded raw message. To/Cc/Bcc are expected
     pre-formatted; From is formatted here from ``from_email`` + optional
     ``from_name``.
+
+    When ``attachments`` is falsy, produces ``multipart/alternative`` (single
+    ``gmail_boundary()``). When attachments are present, produces
+    ``multipart/mixed`` → [``multipart/alternative``] + one part per attachment.
+    Each attachment dict must have ``filename``, ``mime_type``, and ``data``
+    (bytes).
     """
 
     # Reject CR/LF in any user-controlled header value before assembly: bare
@@ -1568,12 +1577,22 @@ def _prepare_gmail_message_web(
     if cc:
         headers.append(("Cc", _safe_header("Cc", cc)))
 
-    message = assemble_alternative(
-        headers=headers,
-        plain_text=plain_body,
-        html_text=html_body,
-        boundary=gmail_boundary(),
-    )
+    if attachments:
+        message = assemble_mixed(
+            headers=headers,
+            plain_text=plain_body,
+            html_text=html_body,
+            attachments=attachments,
+            boundary_mixed=gmail_boundary(),
+            boundary_alt=gmail_boundary(),
+        )
+    else:
+        message = assemble_alternative(
+            headers=headers,
+            plain_text=plain_body,
+            html_text=html_body,
+            boundary=gmail_boundary(),
+        )
     return encode_raw(message)
 
 
@@ -2936,13 +2955,27 @@ async def _forward_gmail_message_impl(
 
     payload = original_message.get("payload", {})
 
-    forward_subject, forward_body, body_format = _build_forward_content(
-        headers=_extract_headers(payload, ["Subject", "From", "Date", "To"]),
-        bodies=_extract_message_bodies(payload),
-        forward_message=forward_message,
-        forward_message_format=forward_message_format,
-        subject_override=subject,
-    )
+    # --- Parse original message metadata ---
+    orig_headers = _extract_headers(payload, ["Subject", "From", "Date", "To"])
+    orig_subject = orig_headers.get("Subject", "(no subject)")
+    orig_from_raw = orig_headers.get("From", "")
+    orig_date_str = orig_headers.get("Date", "")
+    orig_to_raw = orig_headers.get("To", "")
+    orig_bodies = _extract_message_bodies(payload)
+    orig_plain = orig_bodies.get("text", "")
+    orig_html = orig_bodies.get("html", "")
+
+    # Parse the original From into display name + email.
+    orig_from_name, orig_from_email = parseaddr(orig_from_raw)
+    orig_from_name = orig_from_name.strip() or None
+
+    # Derive the forward subject, avoiding a double prefix for "Fwd:"/"FW:".
+    if subject:
+        forward_subject = subject
+    elif orig_subject.lower().lstrip().startswith(("fwd:", "fw:")):
+        forward_subject = orig_subject
+    else:
+        forward_subject = f"Fwd: {orig_subject}"
 
     # Handle attachments
     attachments_to_send = []
@@ -2959,17 +2992,13 @@ async def _forward_gmail_message_impl(
                     .get(userId="me", messageId=message_id, id=att["attachmentId"])
                     .execute
                 )
-                # Gmail returns URL-safe base64 (often unpadded). Decode it
-                # tolerantly and re-encode as standard, padded base64 so the
-                # downstream base64.b64decode() in _prepare_gmail_message succeeds.
+                # Gmail returns URL-safe base64 (often unpadded). Decode to bytes.
                 urlsafe_data = attachment_data.get("data", "")
                 padded = urlsafe_data + "=" * (-len(urlsafe_data) % 4)
-                standard_b64 = base64.b64encode(
-                    base64.urlsafe_b64decode(padded)
-                ).decode()
+                att_bytes = base64.urlsafe_b64decode(padded)
                 attachments_to_send.append(
                     {
-                        "content": standard_b64,
+                        "data": att_bytes,
                         "filename": att["filename"],
                         "mime_type": att["mimeType"],
                     }
@@ -2991,27 +3020,65 @@ async def _forward_gmail_message_impl(
                 + ", ".join(failed_attachments)
             )
 
-    # Prepare and send the message
+    # --- Build forwarded bodies via Gmail-web faithful builders ---
+
+    # When the original has no HTML body, synthesize one from plain text
+    # (mirrors how _build_web_reply_bodies derives html from plain).
+    if not orig_html and orig_plain:
+        orig_html = "<br>".join(html.escape(line) for line in orig_plain.split("\n"))
+
+    # Plain-text note from the user (if any).
+    if forward_message and forward_message_format == "html":
+        # Strip tags for the plain note portion.
+        _extractor = _HTMLTextExtractor()
+        _extractor.feed(forward_message)
+        note_plain = _extractor.get_text()
+        note_html = forward_message
+    else:
+        note_plain = forward_message or ""
+        note_html = plain_body_to_html(forward_message) if forward_message else ""
+
+    # Plain body: optional note + forwarded block (NOT > -quoted).
+    fwd_plain_block = build_forwarded_plain(
+        from_name=orig_from_name,
+        from_email=orig_from_email or orig_from_raw,
+        date_str=orig_date_str,
+        subject=orig_subject,
+        to_rendered_plain=orig_to_raw,
+        orig_plain=orig_plain,
+    )
+    if note_plain:
+        forward_plain = f"{note_plain}\n\n{fwd_plain_block}"
+    else:
+        forward_plain = fwd_plain_block
+
+    # HTML body: note div + forwarded container (no blockquote).
+    fwd_html_container = build_forwarded_container_html(
+        from_name=orig_from_name,
+        from_email=orig_from_email or orig_from_raw,
+        date_str=orig_date_str,
+        subject=orig_subject,
+        to_rendered=orig_to_raw,
+        orig_html=orig_html,
+    )
+    if note_html:
+        forward_html = f'<div dir="ltr">{note_html}<br><br>{fwd_html_container}</div>'
+    else:
+        forward_html = f'<div dir="ltr"><br>{fwd_html_container}</div>'
+
+    # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
-    raw_message, _, attached_count, attachment_errors = _prepare_gmail_message(
+    raw_message = _prepare_gmail_message_web(
         subject=forward_subject,
-        body=forward_body,
+        plain_body=forward_plain,
+        html_body=forward_html,
         to=to,
         cc=cc,
         bcc=bcc,
-        body_format=body_format,
         from_email=sender_email,
         from_name=from_name,
         attachments=attachments_to_send if attachments_to_send else None,
     )
-    if attachments_to_send and attached_count != len(attachments_to_send):
-        details = (
-            f" Details: {'; '.join(attachment_errors)}" if attachment_errors else ""
-        )
-        raise UserInputError(
-            "Failed to include requested attachment(s): "
-            f"{attached_count}/{len(attachments_to_send)} attached.{details}"
-        )
 
     send_body = {"raw": raw_message}
 
@@ -3023,7 +3090,7 @@ async def _forward_gmail_message_impl(
     sent_message_id = sent_message.get("id")
 
     attachment_info = (
-        _format_attachment_result(attached_count, len(attachments_to_send))
+        _format_attachment_result(len(attachments_to_send), len(attachments_to_send))
         if attachments_to_send
         else ""
     )
