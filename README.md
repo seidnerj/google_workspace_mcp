@@ -283,6 +283,8 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 | `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` | | Path to service account JSON key file (domain-wide delegation) |
 | `GOOGLE_SERVICE_ACCOUNT_KEY_JSON` | | Inline service account JSON key (alternative to file) |
 | `DWD_ALLOWED_DOMAINS` | | Comma-separated domain allowlist for per-request impersonation (optional) |
+| **📧 Gmail** | | |
+| `GMAIL_SEND_TRANSPORT` | | `api` (default) or `smtp`. Selects how sent mail is transmitted — `smtp` sends the same raw MIME over `smtp.gmail.com:587` (XOAUTH2) instead of the Gmail API. Applies to new messages, replies, and forwards; drafts and all reads stay API-only. Opting into `smtp` automatically requests the `https://mail.google.com/` scope (re-authenticate to grant it). If that scope is absent, sending falls back to the API and the result notes the missing scope. Unknown values warn and fall back to `api`. |
 | **🔍 Custom Search** | | |
 | `GOOGLE_PSE_API_KEY` | | API key for Programmable Search Engine |
 | `GOOGLE_PSE_ENGINE_ID` | | Search Engine ID for PSE |

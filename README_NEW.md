@@ -263,6 +263,7 @@ uvx workspace-mcp --tools gmail drive --tool-tier extended
 | `WORKSPACE_MCP_PORT` | Server port (default: `8000`) |
 | `WORKSPACE_EXTERNAL_URL` | External URL for reverse proxy setups |
 | `GOOGLE_MCP_CREDENTIALS_DIR` | Custom credentials storage path |
+| `GMAIL_SEND_TRANSPORT` | `api` (default) or `smtp` for sending mail; `smtp` auto-requests the `https://mail.google.com/` scope (re-auth needed) and falls back to the API if absent |
 
 ---
 
