@@ -73,7 +73,9 @@ def _literal_probes(html: str) -> dict:
 def _plain_line_structure(text: str) -> list[str]:
     """Classify each plain-text line by structure (no content)."""
     out = []
-    for line in text.split("\n"):
+    # Normalize CRLF and CR line endings to LF before splitting.
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    for line in normalized.split("\n"):
         if line == ">":
             out.append("QUOTE_BLANK(>)")
         elif line.startswith("> "):

@@ -3,7 +3,7 @@
 All fixtures use synthetic data only (example.com addresses, no personal data).
 """
 
-from tools.golden_skeleton import extract_skeleton, sanitize_html
+from tools.golden_skeleton import extract_skeleton, sanitize_html, _plain_line_structure
 
 RAW = (
     b"MIME-Version: 1.0\r\nFrom: a@example.com\r\nSubject: Re: hi\r\n"
@@ -64,3 +64,32 @@ def test_extract_skeleton_plain_structure():
     sk = extract_skeleton(raw)
     assert any(s.startswith("QUOTE") for s in sk["plain_structure"])
     assert any(s == "BLANK" for s in sk["plain_structure"])
+
+
+def test_plain_line_structure_crlf_normalization():
+    """CRLF line endings should be normalized before classification.
+
+    Without normalization, trailing \r prevents regex patterns (like
+    "On ... wrote:") from matching, and empty lines don't classify as BLANK.
+    """
+    # LF-only input with attribution line
+    lf_text = "On Mon, Jan 1 at 1:00 PM User <u@example.com> wrote:\n\n> quoted\n"
+    lf_result = _plain_line_structure(lf_text)
+
+    # CRLF input — should produce identical classification
+    crlf_text = (
+        "On Mon, Jan 1 at 1:00 PM User <u@example.com> wrote:\r\n\r\n> quoted\r\n"
+    )
+    crlf_result = _plain_line_structure(crlf_text)
+
+    # Attribution line should be detected in both
+    assert any("ATTR_LINE" in item for item in lf_result), (
+        f"LF missing ATTR_LINE: {lf_result}"
+    )
+    assert any("ATTR_LINE" in item for item in crlf_result), (
+        f"CRLF missing ATTR_LINE: {crlf_result}"
+    )
+    # Both should have the same structure
+    assert lf_result == crlf_result, f"LF: {lf_result}\nCRLF: {crlf_result}"
+    # No stray \r characters should appear in output
+    assert not any("\r" in item for item in crlf_result)
