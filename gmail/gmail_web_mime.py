@@ -266,6 +266,32 @@ def _qp_encode(text: str) -> str:
     return encoded.decode("ascii")
 
 
+def _alternative_parts(plain_text: str, html_text: str, boundary: str) -> str:
+    """Return the body of a ``multipart/alternative`` subtree (no top-level headers).
+
+    Emits the two body parts (text/plain + text/html, UTF-8 quoted-printable)
+    bounded by ``boundary``, suitable for use both as a standalone message body
+    and as a child part within a ``multipart/mixed`` message.
+    """
+    crlf = "\r\n"
+
+    def _part(content_type: str, body: str) -> str:
+        return crlf.join(
+            [
+                f"--{boundary}",
+                f'Content-Type: {content_type}; charset="UTF-8"',
+                "Content-Transfer-Encoding: quoted-printable",
+                "",
+                _qp_encode(body),
+            ]
+        )
+
+    plain_part = _part("text/plain", plain_text)
+    html_part = _part("text/html", html_text)
+    closing = f"--{boundary}--"
+    return crlf.join([plain_part, html_part, closing, ""])
+
+
 def assemble_alternative(
     headers: List[Tuple[str, str]],
     plain_text: str,
@@ -287,23 +313,68 @@ def assemble_alternative(
     lines: List[str] = [f"{name}: {value}" for name, value in headers]
     lines.append(f'Content-Type: multipart/alternative; boundary="{boundary}"')
     head = crlf.join(lines)
+    return crlf.join([head, "", _alternative_parts(plain_text, html_text, boundary)])
 
-    def _part(content_type: str, body: str) -> str:
-        return crlf.join(
+
+def assemble_mixed(
+    headers: List[Tuple[str, str]],
+    plain_text: str,
+    html_text: str,
+    attachments: List[dict],
+    boundary_mixed: str,
+    boundary_alt: str,
+) -> str:
+    """Assemble a ``multipart/mixed`` message as a raw RFC5322 string.
+
+    Structure matches Gmail-web's format for forwarded messages with attachments:
+    ``multipart/mixed`` → [``multipart/alternative`` (plain + html)] + one part
+    per attachment.
+
+    Args:
+        headers: Ordered (name, value) pairs (From, To, Subject, etc.).
+        plain_text: Plain-text body.
+        html_text: HTML body.
+        attachments: List of ``{"filename": str, "mime_type": str, "data": bytes}``.
+        boundary_mixed: Boundary string for the outer multipart/mixed.
+        boundary_alt: Boundary string for the inner multipart/alternative child.
+
+    Returns:
+        Raw RFC5322 message string with CRLF separators.
+    """
+    crlf = "\r\n"
+    lines: List[str] = [f"{name}: {value}" for name, value in headers]
+    lines.append(f'Content-Type: multipart/mixed; boundary="{boundary_mixed}"')
+    head = crlf.join(lines)
+
+    # Inner multipart/alternative child part.
+    alt_header = f'Content-Type: multipart/alternative; boundary="{boundary_alt}"'
+    alt_body = _alternative_parts(plain_text, html_text, boundary_alt)
+    alt_part = crlf.join([f"--{boundary_mixed}", alt_header, "", alt_body])
+
+    # Attachment parts.
+    attach_parts: List[str] = []
+    for att in attachments:
+        filename: str = att["filename"]
+        mime_type: str = att["mime_type"]
+        data: bytes = att["data"]
+        b64 = base64.encodebytes(data).decode("ascii")
+        # encodebytes wraps at 76 cols with newlines; normalise to CRLF.
+        b64_crlf = b64.replace("\n", crlf).rstrip(crlf)
+        part = crlf.join(
             [
-                f"--{boundary}",
-                f'Content-Type: {content_type}; charset="UTF-8"',
-                "Content-Transfer-Encoding: quoted-printable",
+                f"--{boundary_mixed}",
+                f'Content-Type: {mime_type}; name="{filename}"',
+                "Content-Transfer-Encoding: base64",
+                f'Content-Disposition: attachment; filename="{filename}"',
                 "",
-                _qp_encode(body),
+                b64_crlf,
             ]
         )
+        attach_parts.append(part)
 
-    plain_part = _part("text/plain", plain_text)
-    html_part = _part("text/html", html_text)
-    closing = f"--{boundary}--"
-
-    return crlf.join([head, "", plain_part, html_part, closing, ""])
+    closing = f"--{boundary_mixed}--"
+    sections = [head, "", alt_part] + attach_parts + [closing, ""]
+    return crlf.join(sections)
 
 
 def encode_raw(message: str) -> str:

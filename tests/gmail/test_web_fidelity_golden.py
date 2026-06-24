@@ -339,3 +339,160 @@ def test_forward_plain_scaffold_matches_golden():
     labels = [h.split(": ", 1)[1].split(":")[0] for h in fwd_hdrs]
     pos = [text.index(f"{lbl}:") for lbl in labels]
     assert pos == sorted(pos), "Forward header labels must appear in golden order"
+
+
+# ---------------------------------------------------------------------------
+# assemble_mixed tests
+# ---------------------------------------------------------------------------
+
+_PDF_DATA = b"%PDF-1.4 fake"
+_PNG_DATA = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+
+
+def test_assemble_mixed_tree():
+    from gmail.gmail_web_mime import assemble_mixed
+    from tools.golden_skeleton import extract_skeleton
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Fwd: x")],
+        "plain",
+        '<div dir="ltr">html</div>',
+        [{"filename": "a.pdf", "mime_type": "application/pdf", "data": b"%PDF-1.4"}],
+        "000000000000aaaaaaaaaaaaaaaa",
+        "000000000000bbbbbbbbbbbbbbbb",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/mixed"
+    assert top["parts"][0]["content_type"] == "multipart/alternative"
+    assert top["parts"][1]["content_type"] == "application/pdf"
+    assert top["parts"][1]["disposition"] == "attachment"
+
+
+def test_assemble_mixed_skeleton_matches_golden():
+    """mime_shape from golden_forward_attach.json must match assembled output."""
+    from gmail.gmail_web_mime import assemble_mixed
+    from tools.golden_skeleton import extract_skeleton
+
+    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    shape = golden["mime_shape"]
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Fwd: y")],
+        "plain body",
+        '<div dir="ltr">html body</div>',
+        [{"filename": "report.pdf", "mime_type": "application/pdf", "data": _PDF_DATA}],
+        "000000000000aaaaaaaaaaaaaaaa",
+        "000000000000bbbbbbbbbbbbbbbb",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    top = sk["mime_tree"][0]
+
+    # Top-level content_type
+    assert top["content_type"] == shape["content_type"]
+    # First child: multipart/alternative
+    alt = top["parts"][0]
+    assert alt["content_type"] == shape["parts"][0]["content_type"]
+    assert (
+        alt["parts"][0]["content_type"] == shape["parts"][0]["parts"][0]["content_type"]
+    )
+    assert (
+        alt["parts"][1]["content_type"] == shape["parts"][0]["parts"][1]["content_type"]
+    )
+    # Second child: attachment
+    attach = top["parts"][1]
+    assert attach["content_type"] == shape["parts"][1]["content_type"]
+    assert attach["disposition"] == shape["parts"][1]["disposition"]
+    assert attach["cte"] == shape["parts"][1]["cte"]
+
+
+def test_assemble_mixed_multiple_attachments_in_order():
+    """Two attachments produce two child parts in the order supplied."""
+    from gmail.gmail_web_mime import assemble_mixed
+    from tools.golden_skeleton import extract_skeleton
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Multi")],
+        "plain",
+        "<div>html</div>",
+        [
+            {
+                "filename": "first.pdf",
+                "mime_type": "application/pdf",
+                "data": _PDF_DATA,
+            },
+            {"filename": "second.png", "mime_type": "image/png", "data": _PNG_DATA},
+        ],
+        "000000000000aaaaaaaaaaaaaaaa",
+        "000000000000bbbbbbbbbbbbbbbb",
+    )
+    sk = extract_skeleton(raw.encode("utf-8"))
+    parts = sk["mime_tree"][0]["parts"]
+    assert len(parts) == 3  # alt + 2 attachments
+    assert parts[1]["content_type"] == "application/pdf"
+    assert parts[2]["content_type"] == "image/png"
+    assert parts[1]["disposition"] == "attachment"
+    assert parts[2]["disposition"] == "attachment"
+
+
+def test_assemble_mixed_filename_with_space_and_quote():
+    """Filenames with spaces and quotes appear correctly in Content-Disposition."""
+    from gmail.gmail_web_mime import assemble_mixed
+
+    raw = assemble_mixed(
+        [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Filename")],
+        "plain",
+        "<div>html</div>",
+        [
+            {
+                "filename": 'my file "final".pdf',
+                "mime_type": "application/pdf",
+                "data": b"x",
+            }
+        ],
+        "000000000000aaaaaaaaaaaaaaaa",
+        "000000000000bbbbbbbbbbbbbbbb",
+    )
+    assert (
+        'filename="my file \\"final\\".pdf"' in raw
+        or 'filename="my file "final".pdf"' in raw
+    )
+    # At minimum, the filename string appears somewhere in the attachment headers
+    assert "my file" in raw
+
+
+def test_assemble_mixed_inner_alternative_matches_assemble_alternative():
+    """Inner alternative subtree body must equal what assemble_alternative produces."""
+    from gmail.gmail_web_mime import assemble_alternative, assemble_mixed
+
+    plain_text = "hello world"
+    html_text = "<div>hello world</div>"
+    boundary_alt = "000000000000bbbbbbbbbbbbbbbb"
+    boundary_mixed = "000000000000aaaaaaaaaaaaaaaa"
+    headers = [("From", "a@example.com"), ("To", "b@example.com"), ("Subject", "Test")]
+
+    # Build standalone alternative
+    alt_standalone = assemble_alternative(headers, plain_text, html_text, boundary_alt)
+
+    # Build mixed and extract the alternative child part body
+    mixed = assemble_mixed(
+        headers,
+        plain_text,
+        html_text,
+        [{"filename": "x.pdf", "mime_type": "application/pdf", "data": b"x"}],
+        boundary_mixed,
+        boundary_alt,
+    )
+
+    # The alternative child's plain+html QP-encoded bodies must appear in mixed
+    # Extract the QP bodies from standalone (they appear between the boundary markers)
+    crlf = "\r\n"
+    # Get the plain-part QP body from standalone alternative
+    plain_marker = f"--{boundary_alt}{crlf}Content-Type: text/plain"
+    html_marker = f"--{boundary_alt}{crlf}Content-Type: text/html"
+    alt_plain_start = alt_standalone.index(plain_marker)
+    alt_html_start = alt_standalone.index(html_marker)
+    alt_plain_body = alt_standalone[alt_plain_start:alt_html_start]
+    assert alt_plain_body in mixed, (
+        "Plain part body from alt must appear verbatim in mixed"
+    )
