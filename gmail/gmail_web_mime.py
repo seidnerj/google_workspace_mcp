@@ -166,6 +166,98 @@ def build_quote_container_html(attribution_html: str, parent_html: str) -> str:
     )
 
 
+def build_forwarded_container_html(
+    from_name: Optional[str],
+    from_email: str,
+    date_str: str,
+    subject: str,
+    to_rendered: str,
+    orig_html: str,
+) -> str:
+    """Assemble the Gmail-web ``gmail_quote_container`` div for a forwarded message.
+
+    The attribution block follows Gmail's exact forward header layout:
+    a ``---------- Forwarded message ---------`` separator followed by
+    From/Date/Subject/To lines inside a ``gmail_attr`` div.  No blockquote
+    is used — forwarded content is embedded directly after the attr div.
+
+    Args:
+        from_name: Sender display name; empty/whitespace → bare-email rendering.
+        from_email: Sender email address.
+        date_str: Pre-formatted date string (passed through verbatim).
+        subject: Email subject (HTML-escaped by this function).
+        to_rendered: Pre-rendered recipient HTML (inserted verbatim).
+        orig_html: Original message HTML body (inserted verbatim).
+
+    Returns:
+        A string containing the full forwarded container div.
+    """
+    safe_email = _html.escape(from_email)
+    safe_subject = _escape_body(subject)
+
+    if from_name and from_name.strip():
+        safe_name = _escape_body(from_name)
+        from_field = (
+            f'<strong class="gmail_sendername" dir="auto">{safe_name}</strong> '
+            f'<span dir="auto">&lt;<a href="mailto:{safe_email}">{safe_email}</a>&gt;</span>'
+        )
+    else:
+        from_field = f'<span dir="auto">&lt;<a href="mailto:{safe_email}">{safe_email}</a>&gt;</span>'
+
+    attr_div = (
+        '<div dir="ltr" class="gmail_attr">'
+        "---------- Forwarded message ---------<br>"
+        f"From: {from_field}<br>"
+        f"Date: {date_str}<br>"
+        f"Subject: {safe_subject}<br>"
+        f"To: {to_rendered}<br>"
+        "</div>"
+    )
+
+    return f'<div class="gmail_quote gmail_quote_container">{attr_div}{orig_html}</div>'
+
+
+def build_forwarded_plain(
+    from_name: Optional[str],
+    from_email: str,
+    date_str: str,
+    subject: str,
+    to_rendered_plain: str,
+    orig_plain: str,
+) -> str:
+    """Assemble the plain-text body for a forwarded message.
+
+    Follows Gmail's exact plain-text forward layout: a separator line,
+    From/Date/Subject/To header lines, a blank line, then the original body
+    verbatim (NOT ``> ``-quoted).
+
+    Args:
+        from_name: Sender display name; empty/whitespace → bare email only.
+        from_email: Sender email address.
+        date_str: Pre-formatted date string.
+        subject: Email subject (not escaped — plain text context).
+        to_rendered_plain: Pre-rendered plain-text recipient string.
+        orig_plain: Original message plain-text body (inserted verbatim).
+
+    Returns:
+        A plain-text string with the forwarded message structure.
+    """
+    if from_name and from_name.strip():
+        from_field = f"{from_name} <{from_email}>"
+    else:
+        from_field = from_email
+
+    return (
+        "---------- Forwarded message ---------\n"
+        f"From: {from_field}\n"
+        f"Date: {date_str}\n"
+        f"Subject: {subject}\n"
+        f"To: {to_rendered_plain}\n"
+        f"\n"
+        f"{orig_plain}"
+    )
+
+
 def _qp_encode(text: str) -> str:
     """Quoted-printable encode text with CRLF line endings (76-col soft wrap)."""
     # Normalize to CRLF so quopri's soft-wrapping operates on canonical lines.
