@@ -1393,6 +1393,7 @@ def _split_resolved_attachments(
                 path_obj = validate_file_path(file_path)
                 if not path_obj.exists():
                     logger.error("File not found: %s", file_path)
+                    attachment_errors.append(f"{filename or file_path}: file not found")
                     continue
                 with open(path_obj, "rb") as fh:
                     file_data = fh.read()
@@ -1462,6 +1463,10 @@ def _split_resolved_attachments(
         except (binascii.Error, ValueError) as e:
             logger.error("Failed to decode attachment %s: %s", filename or file_path, e)
             attachment_errors.append(_format_attachment_error(file_path, filename, e))
+            continue
+        except FileNotFoundError:
+            logger.error("File not found: %s", file_path)
+            attachment_errors.append(f"{filename or file_path}: file not found")
             continue
         except Exception as e:
             logger.error(

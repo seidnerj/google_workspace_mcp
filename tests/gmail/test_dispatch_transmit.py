@@ -4,6 +4,7 @@ All addresses and identifiers are synthetic (example.com only).
 """
 
 import base64
+import re
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
@@ -355,6 +356,142 @@ class TestDispatchTransmitSmtpPath:
         assert "bob@example.com" in env
         assert "carol@example.com" in env
         assert "dave@example.com" in env
+
+    @pytest.mark.asyncio
+    async def test_smtp_raw_contains_message_id_header(self, monkeypatch):
+        """SMTP path must inject a unique Message-ID header into the raw bytes."""
+        captured = {}
+
+        async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
+            captured["raw_bytes"] = raw_bytes
+            return "OK queued"
+
+        monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
+        service = _make_service(list_result={"messages": [{"id": "found-id"}]})
+
+        raw_no_msgid = base64.urlsafe_b64encode(
+            b"MIME-Version: 1.0\r\nSubject: hi\r\n\r\nBody"
+        ).decode()
+
+        await t.dispatch_transmit(
+            service,
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=raw_no_msgid,
+            thread_id_final=None,
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=None,
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        raw = captured["raw_bytes"].decode("ascii", errors="replace")
+        assert "Message-ID:" in raw or "Message-Id:" in raw
+        msgid_match = re.search(r"Message-ID:\s*(<[^>]+@[^>]+>)", raw)
+        assert msgid_match, f"No valid Message-ID header found in raw bytes: {raw[:300]}"
+        assert "@example.com" in msgid_match.group(1)
+
+    @pytest.mark.asyncio
+    async def test_smtp_lookup_uses_rfc822msgid_query(self, monkeypatch):
+        """_lookup_message_id must issue a Gmail query containing rfc822msgid:."""
+        captured = {}
+
+        async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
+            return "OK queued"
+
+        monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
+
+        service = MagicMock()
+        service.users.return_value.messages.return_value.send.return_value.execute = (
+            MagicMock(return_value={"id": "x"})
+        )
+
+        def fake_list(userId, q, maxResults=1):
+            captured["q"] = q
+            result = MagicMock()
+            result.execute = MagicMock(return_value={"messages": [{"id": "found-1"}]})
+            return result
+
+        service.users.return_value.messages.return_value.list.side_effect = fake_list
+
+        raw_no_msgid = base64.urlsafe_b64encode(
+            b"MIME-Version: 1.0\r\nSubject: hi\r\n\r\nBody"
+        ).decode()
+
+        await t.dispatch_transmit(
+            service,
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=raw_no_msgid,
+            thread_id_final=None,
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=None,
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        assert "q" in captured, "messages().list was never called"
+        assert "rfc822msgid:" in captured["q"], (
+            f"Expected rfc822msgid: in query, got: {captured['q']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_smtp_existing_message_id_not_duplicated(self, monkeypatch):
+        """If the raw already has a Message-ID, it must not be injected again."""
+        captured = {}
+
+        async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
+            captured["raw_bytes"] = raw_bytes
+            return "OK queued"
+
+        monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
+        service = _make_service(list_result={"messages": [{"id": "found-id"}]})
+
+        existing_msgid = "<existing-123@example.com>"
+        raw_with_msgid = base64.urlsafe_b64encode(
+            f"MIME-Version: 1.0\r\nMessage-ID: {existing_msgid}\r\nSubject: hi\r\n\r\nBody".encode()
+        ).decode()
+
+        await t.dispatch_transmit(
+            service,
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=raw_with_msgid,
+            thread_id_final=None,
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=None,
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        raw = captured["raw_bytes"].decode("ascii", errors="replace")
+        # Count occurrences — must have exactly one Message-ID header
+        count = sum(
+            1 for line in raw.splitlines()
+            if line.lower().startswith("message-id:")
+        )
+        assert count == 1, f"Expected exactly 1 Message-ID header, got {count}: {raw[:300]}"
 
     @pytest.mark.asyncio
     async def test_smtp_expired_creds_refreshed(self, monkeypatch):

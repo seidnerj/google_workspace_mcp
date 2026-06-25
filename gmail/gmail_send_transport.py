@@ -4,7 +4,7 @@ import asyncio
 import base64
 import logging
 import smtplib
-from email.utils import getaddresses
+from email.utils import getaddresses, make_msgid
 
 from auth.credential_store import get_credential_store
 from auth.scopes import (
@@ -152,6 +152,59 @@ def _bare_addresses(header_values: list[str | None]) -> list[str]:
     return result
 
 
+def _inject_message_id(raw_bytes: bytes, sender: str) -> tuple[bytes, str]:
+    """Inject a unique ``Message-ID`` header into *raw_bytes* if not already present.
+
+    Performs string surgery on the header block (no re-parse/re-serialize) so
+    that no other bytes are altered.  Inserts immediately after the
+    ``MIME-Version: 1.0`` line when present; otherwise after the first header
+    line.
+
+    Returns ``(modified_bytes, msgid)`` where *msgid* is the authored id string
+    (e.g. ``<...@example.com>``).  If a ``Message-ID`` / ``Message-Id`` header
+    already exists the original bytes are returned unchanged and the existing id
+    is extracted and returned.
+    """
+    try:
+        text = raw_bytes.decode("ascii", errors="surrogateescape")
+    except Exception:
+        # Non-ASCII raw — fall back to a generated id, return bytes unchanged
+        domain = sender.split("@", 1)[-1] if "@" in sender else "gmail.com"
+        return raw_bytes, make_msgid(domain=domain)
+
+    # Check for an existing Message-ID (case-insensitive).
+    for line in text.split("\r\n"):
+        if line.lower().startswith("message-id:"):
+            existing = line.split(":", 1)[1].strip()
+            return raw_bytes, existing
+
+    # Generate a unique id using the sender's domain.
+    domain = sender.split("@", 1)[-1] if "@" in sender else "gmail.com"
+    msgid = make_msgid(domain=domain)
+    new_header_line = f"Message-ID: {msgid}\r\n"
+
+    # Insert after "MIME-Version: 1.0" if present, else after the first header line.
+    lines = text.split("\r\n")
+    insert_after = 0
+    for i, line in enumerate(lines):
+        if line.lower().startswith("mime-version:"):
+            insert_after = i
+            break
+
+    lines.insert(insert_after + 1, f"Message-ID: {msgid}")
+    modified = "\r\n".join(lines)
+    try:
+        modified_bytes = modified.encode("ascii", errors="surrogateescape")
+    except Exception:
+        return raw_bytes, msgid
+
+    # Sanity check: the new_header_line content is in the result.
+    if new_header_line.rstrip("\r\n") not in modified:
+        return raw_bytes, msgid
+
+    return modified_bytes, msgid
+
+
 async def _dispatch_smtp(
     *,
     service,
@@ -175,6 +228,9 @@ async def _dispatch_smtp(
 
     raw_bytes = base64.urlsafe_b64decode(raw_message_b64)
 
+    # Inject a unique Message-ID so we can look up the message after send.
+    raw_bytes, msgid = _inject_message_id(raw_bytes, sender)
+
     envelope_recipients = _bare_addresses(
         [
             *(to or []),
@@ -195,7 +251,7 @@ async def _dispatch_smtp(
     mid_suffix = await _lookup_message_id(
         service=service,
         creds=creds,
-        subject=subject,
+        msgid=msgid,
         action_label=action_label,
         resp=resp,
     )
@@ -206,7 +262,7 @@ async def _lookup_message_id(
     *,
     service,
     creds,
-    subject: str,
+    msgid: str,
     action_label: str,
     resp: str,
 ) -> str:
@@ -225,9 +281,8 @@ async def _lookup_message_id(
                 f" scope(s))"
             )
 
-        # Scope present — do a recency-bounded search.
-        safe_subject = subject.replace('"', '\\"')
-        q = f'in:sent subject:"{safe_subject}" newer_than:1d'
+        # Scope present — look up by the authored Message-ID.
+        q = f"rfc822msgid:{msgid}"
         res = await asyncio.to_thread(
             service.users().messages().list(userId="me", q=q, maxResults=1).execute
         )

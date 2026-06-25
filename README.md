@@ -294,7 +294,7 @@ uv run main.py --transport streamable-http --tools gmail drive calendar
 </sub>
 </details>
 
-#### Send-transport message fingerprint
+### Send-transport message fingerprint
 
 `GMAIL_SEND_TRANSPORT` (`api` default, or `smtp`) only changes how a message is
 *submitted* — the message **body and MIME structure are byte-identical** on both
@@ -305,7 +305,7 @@ the delivered raw headers:
 | Trait | Gmail web UI | `api` (default) | `smtp` |
 |---|---|---|---|
 | Body / MIME structure | reference | ✅ identical | ✅ identical |
-| `Message-ID` | `…@mail.gmail.com` | ✅ `…@mail.gmail.com` | ❌ `…@mx.google.com` |
+| `Message-ID` | `…@mail.gmail.com` | ✅ `…@mail.gmail.com` | ❌ authored `<…@sender-domain>` — not `@mail.gmail.com` |
 | Origin `Received` hop | `from mail-sor-NN.google.com` only | adds `from <project#> … by gmailapi.google.com` | adds `from <reverse-dns> ([your client IP])` + `ESMTPSA` |
 | Exposes your IP to recipients | no | no | **yes** (plus ISP via reverse-DNS) |
 | Reveals the send method | no | yes (names `gmailapi.google.com`) | yes (SMTP submission) |

@@ -670,3 +670,23 @@ async def test_send_missing_filename_gives_nonempty_details():
     # The Details section must not be empty — something after "Details: "
     details_part = msg.split("Details:", 1)[1].strip()
     assert details_part, f"Details section must not be empty, got: {msg!r}"
+
+
+# ---------------------------------------------------------------------------
+# 9. file_path not found → error recorded in attachment_errors (Finding 2)
+# ---------------------------------------------------------------------------
+
+
+def test_split_nonexistent_path_records_file_not_found_error(tmp_path):
+    """A file_path that does not exist must appear in attachment_errors
+    as a 'file not found' entry, not be silently skipped.
+    """
+    missing = str(tmp_path / "does_not_exist.pdf")
+    _, _, count, errors = _split_resolved_attachments(
+        [{"path": missing, "filename": "does_not_exist.pdf", "mime_type": "application/pdf"}]
+    )
+    assert count == 0
+    assert len(errors) == 1, f"Expected 1 error entry, got {len(errors)}: {errors}"
+    assert "file not found" in errors[0].lower(), (
+        f"Error must mention 'file not found', got: {errors[0]!r}"
+    )
