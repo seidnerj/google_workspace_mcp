@@ -395,7 +395,9 @@ class TestDispatchTransmitSmtpPath:
         raw = captured["raw_bytes"].decode("ascii", errors="replace")
         assert "Message-ID:" in raw or "Message-Id:" in raw
         msgid_match = re.search(r"Message-ID:\s*(<[^>]+@[^>]+>)", raw)
-        assert msgid_match, f"No valid Message-ID header found in raw bytes: {raw[:300]}"
+        assert msgid_match, (
+            f"No valid Message-ID header found in raw bytes: {raw[:300]}"
+        )
         assert "@example.com" in msgid_match.group(1)
 
     @pytest.mark.asyncio
@@ -488,10 +490,28 @@ class TestDispatchTransmitSmtpPath:
         raw = captured["raw_bytes"].decode("ascii", errors="replace")
         # Count occurrences — must have exactly one Message-ID header
         count = sum(
-            1 for line in raw.splitlines()
-            if line.lower().startswith("message-id:")
+            1 for line in raw.splitlines() if line.lower().startswith("message-id:")
         )
-        assert count == 1, f"Expected exactly 1 Message-ID header, got {count}: {raw[:300]}"
+        assert count == 1, (
+            f"Expected exactly 1 Message-ID header, got {count}: {raw[:300]}"
+        )
+
+    def test_inject_message_id_ignores_body_message_id_line(self):
+        """A 'Message-ID:' line in the BODY must not short-circuit header injection."""
+        raw = (
+            b"MIME-Version: 1.0\r\nSubject: fwd\r\n\r\n"
+            b"Quoted original below:\r\nMessage-ID: <fake-body@evil.example>\r\nrest"
+        )
+        out, msgid = t._inject_message_id(raw, "alice@example.com")
+        # A real header Message-ID was generated from the sender domain — NOT the
+        # decoy line embedded in the body.
+        assert msgid.endswith("@example.com>"), msgid
+        assert "fake-body@evil.example" not in msgid
+        text = out.decode("ascii")
+        header_block, _, body = text.partition("\r\n\r\n")
+        assert f"Message-ID: {msgid}" in header_block
+        # Body preserved verbatim, including its decoy Message-ID line.
+        assert "Message-ID: <fake-body@evil.example>" in body
 
     @pytest.mark.asyncio
     async def test_smtp_expired_creds_refreshed(self, monkeypatch):

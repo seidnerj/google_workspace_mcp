@@ -172,8 +172,15 @@ def _inject_message_id(raw_bytes: bytes, sender: str) -> tuple[bytes, str]:
         domain = sender.split("@", 1)[-1] if "@" in sender else "gmail.com"
         return raw_bytes, make_msgid(domain=domain)
 
-    # Check for an existing Message-ID (case-insensitive).
-    for line in text.split("\r\n"):
+    # Split the header block from the body — only headers may carry a
+    # Message-ID. Scanning the body too could falsely match a quoted/forwarded
+    # "Message-ID:" line and short-circuit injection (feeding body text to the
+    # rfc822msgid lookup).
+    header_text, sep, body_text = text.partition("\r\n\r\n")
+    header_lines = header_text.split("\r\n")
+
+    # Check for an existing Message-ID (case-insensitive) in the headers only.
+    for line in header_lines:
         if line.lower().startswith("message-id:"):
             existing = line.split(":", 1)[1].strip()
             return raw_bytes, existing
@@ -181,25 +188,19 @@ def _inject_message_id(raw_bytes: bytes, sender: str) -> tuple[bytes, str]:
     # Generate a unique id using the sender's domain.
     domain = sender.split("@", 1)[-1] if "@" in sender else "gmail.com"
     msgid = make_msgid(domain=domain)
-    new_header_line = f"Message-ID: {msgid}\r\n"
 
-    # Insert after "MIME-Version: 1.0" if present, else after the first header line.
-    lines = text.split("\r\n")
+    # Insert after "MIME-Version:" if present, else after the first header line.
     insert_after = 0
-    for i, line in enumerate(lines):
+    for i, line in enumerate(header_lines):
         if line.lower().startswith("mime-version:"):
             insert_after = i
             break
 
-    lines.insert(insert_after + 1, f"Message-ID: {msgid}")
-    modified = "\r\n".join(lines)
+    header_lines.insert(insert_after + 1, f"Message-ID: {msgid}")
+    modified = "\r\n".join(header_lines) + (sep + body_text if sep else "")
     try:
         modified_bytes = modified.encode("ascii", errors="surrogateescape")
     except Exception:
-        return raw_bytes, msgid
-
-    # Sanity check: the new_header_line content is in the result.
-    if new_header_line.rstrip("\r\n") not in modified:
         return raw_bytes, msgid
 
     return modified_bytes, msgid
