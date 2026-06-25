@@ -683,7 +683,13 @@ def test_split_nonexistent_path_records_file_not_found_error(tmp_path):
     """
     missing = str(tmp_path / "does_not_exist.pdf")
     _, _, count, errors = _split_resolved_attachments(
-        [{"path": missing, "filename": "does_not_exist.pdf", "mime_type": "application/pdf"}]
+        [
+            {
+                "path": missing,
+                "filename": "does_not_exist.pdf",
+                "mime_type": "application/pdf",
+            }
+        ]
     )
     assert count == 0
     assert len(errors) == 1, f"Expected 1 error entry, got {len(errors)}: {errors}"
