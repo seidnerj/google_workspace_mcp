@@ -724,9 +724,7 @@ class TestFilenameHeaderSafety:
     def test_inline_part_no_injection_via_content_id(self):
         from gmail.gmail_web_mime import _inline_part
 
-        part = _inline_part(
-            "BND", "img.png", "image/png", b"d", "cid\r\nX-Evil: 1"
-        )
+        part = _inline_part("BND", "img.png", "image/png", b"d", "cid\r\nX-Evil: 1")
         assert "\r\nX-Evil" not in part
         assert "\rX-Evil" not in part and "\nX-Evil" not in part
 
