@@ -64,17 +64,20 @@ def format_display_address(name: Optional[str], email: str) -> str:
     ``email.utils.formataddr`` handles RFC5322 quoting; for non-ASCII it falls
     back to RFC2047 via ``email.headerregistry.Address``.
     """
+    # Strip CR/LF/NUL from the address too: formataddr does not sanitize it, so
+    # an unvalidated CRLF-bearing address would be RFC5322 header injection.
+    safe_email = _strip_header_controls(email)
     if not name or not name.strip():
-        return email
-    safe_name = name.replace("\r", "").replace("\n", "").replace("\x00", "")
+        return safe_email
+    safe_name = _strip_header_controls(name)
     try:
         safe_name.encode("ascii")
         # ASCII name: formataddr applies RFC5322 quoting when needed.
-        return formataddr((safe_name, email))
+        return formataddr((safe_name, safe_email))
     except UnicodeEncodeError:
         # Non-ASCII name: RFC2047 encoded-word for the display phrase.
         encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998)
-        return f"{encoded_name} <{email}>"
+        return f"{encoded_name} <{safe_email}>"
 
 
 def _escape_body(text: str) -> str:

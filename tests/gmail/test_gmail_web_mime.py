@@ -57,6 +57,19 @@ class TestDisplayAddress:
         # No raw non-ASCII bytes leak into the header.
         result.encode("ascii")
 
+    def test_email_arg_crlf_stripped_ascii_name(self):
+        # A CRLF-bearing address must not inject a new header line.
+        out = format_display_address("Ada", "ada@example.com\r\nBcc: evil@example.com")
+        assert "\r\n" not in out and "\r" not in out and "\n" not in out
+
+    def test_email_arg_crlf_stripped_no_name(self):
+        out = format_display_address(None, "ada@example.com\r\nBcc: evil@example.com")
+        assert "\r" not in out and "\n" not in out
+
+    def test_email_arg_crlf_stripped_non_ascii_name(self):
+        out = format_display_address("Adá", "ada@example.com\r\nBcc: evil@example.com")
+        assert "\r" not in out and "\n" not in out
+
 
 class TestBaseTextDirection:
     def test_english_is_ltr(self):
@@ -304,6 +317,17 @@ class TestPrepareWebMessage:
             for part in parsed.walk()
             if part.get_content_type() == "text/html"
         )
+
+    def test_long_non_ascii_subject_does_not_raise(self):
+        # A long non-ASCII subject RFC2047-folds; folding with a bare LF would
+        # trip the CR/LF header guard and raise. It must encode cleanly instead.
+        long_subject = "נושא ארוך מאוד " * 60  # well over one folded line
+        raw = self._build(plain="Hi", subject=long_subject)
+        subject_lines = [
+            line for line in raw.splitlines() if line.startswith("Subject:")
+        ]
+        assert subject_lines, raw
+        assert "=?utf-8?" in raw.lower()
 
     def test_auto_direction_hebrew_body_is_rtl(self):
         msg = self._build_autobody("שלום עולם")

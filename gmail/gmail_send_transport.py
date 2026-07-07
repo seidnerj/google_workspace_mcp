@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import smtplib
+import ssl
 from email.utils import getaddresses, make_msgid
 
 from auth.credential_store import get_credential_store
@@ -44,7 +45,10 @@ async def send_via_smtp(
 
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
             smtp.ehlo()
-            smtp.starttls()
+            # Explicit verifying context: starttls() without one uses a
+            # non-verifying stdlib context on modern Python, which would expose
+            # the XOAUTH2 bearer token to a MITM.
+            smtp.starttls(context=ssl.create_default_context())
             smtp.ehlo()
             code, response = smtp.docmd("AUTH", "XOAUTH2 " + b64)
             if code == 334:

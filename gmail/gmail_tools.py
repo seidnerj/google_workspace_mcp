@@ -1671,12 +1671,17 @@ def _prepare_gmail_message_web(
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
     if bcc and include_bcc_header:
         headers.append(("Bcc", _safe_header("Bcc", bcc)))
+    # Guard the caller-supplied subject for header injection BEFORE encoding.
+    # A long non-ASCII subject RFC2047-folds into a multi-line continuation; with
+    # linesep="\r\n" that is a valid RFC5322 fold, but _safe_header would reject
+    # its CRLF, so validate the raw input and append the encoded value directly.
+    _safe_header("Subject", subject)
     subj_value = (
         subject
         if subject.isascii()
-        else Header(subject, "utf-8").encode(maxlinelen=998)
+        else Header(subject, "utf-8").encode(maxlinelen=998, linesep="\r\n")
     )
-    headers.append(("Subject", _safe_header("Subject", subj_value)))
+    headers.append(("Subject", subj_value))
     if from_email:
         headers.append(
             (

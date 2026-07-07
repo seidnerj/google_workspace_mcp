@@ -17,6 +17,7 @@ class FakeSMTP:
         self.host, self.port = host, port
         self.cmds = []
         self.sent = None
+        self.starttls_context = None
         FakeSMTP.instances.append(self)
 
     def __enter__(self):
@@ -28,8 +29,9 @@ class FakeSMTP:
     def ehlo(self):
         self.cmds.append("ehlo")
 
-    def starttls(self):
+    def starttls(self, *args, **kwargs):
         self.cmds.append("starttls")
+        self.starttls_context = kwargs.get("context", args[0] if args else None)
 
     def docmd(self, cmd, arg=""):
         self.cmds.append(("docmd", cmd, arg))
@@ -142,3 +144,20 @@ async def test_send_via_smtp_334_challenge_consumed_before_raise(monkeypatch):
     s = FakeSMTP.instances[-1]
     # An empty-string continuation must have been sent after the AUTH command.
     assert ("docmd", "", "") in s.cmds
+
+
+@pytest.mark.asyncio
+async def test_send_via_smtp_starttls_uses_verifying_context(monkeypatch):
+    """STARTTLS must pass an explicit verifying SSL context; the stdlib default
+    for starttls() without context is non-verifying on modern Python, which
+    would expose the XOAUTH2 bearer token to a MITM."""
+    import ssl
+
+    monkeypatch.setattr(t.smtplib, "SMTP", FakeSMTP)
+    await t.send_via_smtp(
+        "me@example.com", ["a@example.com"], b"raw", "me@example.com", "TOKEN123"
+    )
+    s = FakeSMTP.instances[-1]
+    assert isinstance(s.starttls_context, ssl.SSLContext)
+    assert s.starttls_context.verify_mode == ssl.CERT_REQUIRED
+    assert s.starttls_context.check_hostname is True

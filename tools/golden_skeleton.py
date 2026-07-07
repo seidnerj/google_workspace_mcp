@@ -141,18 +141,8 @@ def _build_mime_tree(msg) -> dict:
 
 
 def _header_skeleton(msg) -> list[str]:
-    """Return header names (and structural values for key headers)."""
-    structural = {"content-type", "content-transfer-encoding", "mime-version"}
-    out = []
-    for k, v in msg.items():
-        if k.lower() in structural:
-            out.append(f"{k}: {v}")
-        elif k.lower() == "message-id":
-            dom = v.split("@")[-1].rstrip(">") if "@" in v else "?"
-            out.append(f"{k}: <...@{dom}>")
-        else:
-            out.append(k)
-    return out
+    """Return header names in the order they appear."""
+    return [k for k, _ in msg.items()]
 
 
 def _get_html_and_plain(msg) -> tuple[str, str]:
@@ -269,9 +259,10 @@ def extract_skeleton(raw_bytes: bytes) -> dict:
     Returns a dict with keys:
 
     ``headers_order``
-        List of header name strings (structural values included for
-        Content-Type, Content-Transfer-Encoding, MIME-Version, Message-ID;
-        all other headers are name-only).
+        List of header name strings, in the order they appear (names only).
+        Header *value* fidelity (Content-Type boundary shape, transfer
+        encoding, etc.) is asserted separately via the full MIME-tree /
+        golden-body comparison, not here.
 
     ``mime_tree``
         List containing the single root MIME tree node (a dict); multipart
@@ -292,9 +283,7 @@ def extract_skeleton(raw_bytes: bytes) -> dict:
     html, plain = _get_html_and_plain(msg)
 
     return {
-        "headers_order": [
-            h.split(":")[0] if ":" in h else h for h in _header_skeleton(msg)
-        ],
+        "headers_order": _header_skeleton(msg),
         "mime_tree": [_build_mime_tree(msg)],
         "html_tags": _tag_list(html) if html else [],
         "html_probes": _literal_probes(html) if html else {},
