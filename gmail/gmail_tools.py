@@ -2710,7 +2710,7 @@ async def send_gmail_message(
     direction: Annotated[
         Literal["auto", "ltr", "rtl"],
         Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm.",
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body only; the plain-text alternative carries no direction marker (matching Gmail web), so if a client renders the plain-text part standalone, right-to-left content may appear left-aligned.",
         ),
     ] = "auto",
 ) -> str:
@@ -3273,7 +3273,7 @@ async def draft_gmail_message(
     direction: Annotated[
         Literal["auto", "ltr", "rtl"],
         Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm.",
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body only; the plain-text alternative carries no direction marker (matching Gmail web), so if a client renders the plain-text part standalone, right-to-left content may appear left-aligned.",
         ),
     ] = "auto",
 ) -> str:
