@@ -6,7 +6,12 @@ All fixtures use synthetic data only (example.com addresses, no personal data).
 import email.mime.multipart
 import email.mime.text
 
-from tools.golden_skeleton import extract_skeleton, sanitize_html, _plain_line_structure
+from tools.golden_skeleton import (
+    extract_skeleton,
+    sanitize_html,
+    _plain_line_structure,
+    _Sanitizer,
+)
 
 
 def _make_raw(html: str, plain: str = "body") -> bytes:
@@ -203,3 +208,23 @@ def test_sanitize_html_multi_class_gmail_sendername_suppresses_text():
     assert "Jane" not in out, f"sender name leaked: {out!r}"
     assert "Doe" not in out, f"sender name leaked: {out!r}"
     assert 'class="gmail_sendername bold-name"' in out, f"tag class missing: {out!r}"
+
+
+def test_bare_void_element_does_not_desync_class_stack():
+    """A bare void element (<br>, no trailing slash) inside a classed element must
+    not leave a dangling entry on the class stack. Gmail HTML emits bare <br>
+    (e.g. in gmail_attr blocks); html.parser fires handle_starttag but never a
+    matching handle_endtag for it, so pushing it would desync redact tracking."""
+    s = _Sanitizer()
+    s.feed('<div class="gmail_attr"><br></div>')
+    assert s._class_stack == [], f"stack desynced: {s._class_stack!r}"
+    assert s._in_redact_element() is False
+
+
+def test_bare_void_element_keeps_redaction_scoped():
+    """After a redact element closes, later text must NOT be treated as redacted
+    even when a bare <br> appeared inside it."""
+    out = sanitize_html('<div class="gmail_attr">secret<br></div><span>KEEPME</span>')
+    # The gmail_attr inner text is redacted; the trailing span structure remains.
+    assert "<span>" in out
+    assert "secret" not in out

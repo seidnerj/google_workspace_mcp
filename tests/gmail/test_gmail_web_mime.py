@@ -677,3 +677,47 @@ class TestNonAsciiSubjectEncoding:
             for part, charset in decoded_parts
         )
         assert decoded == original, f"Round-trip failed: {decoded!r} != {original!r}"
+
+
+class TestFilenameHeaderSafety:
+    def test_escape_filename_strips_crlf_and_nul(self):
+        from gmail.gmail_web_mime import _escape_filename
+
+        out = _escape_filename("a\r\nX-Evil: 1\x00.pdf")
+        assert "\r" not in out and "\n" not in out and "\x00" not in out
+
+    def test_attachment_part_no_header_injection_via_filename(self):
+        from gmail.gmail_web_mime import _attachment_part
+
+        part = _attachment_part(
+            "BND", "x\r\nBcc: evil@example.com\r\n.pdf", "application/pdf", b"data"
+        )
+        # The injection vector is a CRLF that starts a new header line; after
+        # stripping, the filename text stays on its own header line (harmless).
+        assert "\r\nBcc:" not in part
+        assert "\rBcc:" not in part and "\nBcc:" not in part
+
+    def test_inline_part_no_injection_via_content_id(self):
+        from gmail.gmail_web_mime import _inline_part
+
+        part = _inline_part(
+            "BND", "img.png", "image/png", b"d", "cid\r\nX-Evil: 1"
+        )
+        assert "\r\nX-Evil" not in part
+        assert "\rX-Evil" not in part and "\nX-Evil" not in part
+
+    def test_ascii_filename_is_byte_identical_quoted_string(self):
+        from gmail.gmail_web_mime import _attachment_part
+
+        part = _attachment_part("BND", "report.pdf", "application/pdf", b"d")
+        assert 'name="report.pdf"' in part
+        assert 'filename="report.pdf"' in part
+
+    def test_non_ascii_filename_uses_rfc2231(self):
+        from gmail.gmail_web_mime import _attachment_part
+
+        part = _attachment_part("BND", "café.pdf", "application/pdf", b"d")
+        # No raw non-ASCII bytes leak into the header; RFC 2231 extended params used.
+        assert "café.pdf" not in part
+        assert "name*=UTF-8''caf%C3%A9.pdf" in part
+        assert "filename*=UTF-8''caf%C3%A9.pdf" in part

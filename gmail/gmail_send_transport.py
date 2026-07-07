@@ -47,6 +47,12 @@ async def send_via_smtp(
             smtp.starttls()
             smtp.ehlo()
             code, response = smtp.docmd("AUTH", "XOAUTH2 " + b64)
+            if code == 334:
+                # Gmail returned a SASL challenge (for XOAUTH2 this carries a
+                # base64 error payload). Send the required empty continuation to
+                # finish the exchange and read the final status, so the context
+                # manager's QUIT doesn't raise and mask the real auth failure.
+                code, response = smtp.docmd("")
             if code != 235:
                 raise smtplib.SMTPAuthenticationError(code, response)
             smtp.sendmail(sender, envelope_recipients, raw_bytes)

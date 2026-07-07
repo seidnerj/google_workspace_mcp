@@ -18,7 +18,7 @@ import secrets
 import unicodedata
 from datetime import datetime
 from email.header import Header
-from email.utils import formataddr
+from email.utils import encode_rfc2231, formataddr
 from typing import List, Optional, Tuple
 
 # Gmail's byte-identical blockquote style string for quoted replies.
@@ -422,9 +422,36 @@ def assemble_alternative(
     return crlf.join([head, "", _alternative_parts(plain_text, html_text, boundary)])
 
 
+def _strip_header_controls(value: str) -> str:
+    """Remove CR/LF/NUL so a value can't inject extra MIME header lines."""
+    return value.replace("\r", "").replace("\n", "").replace("\x00", "")
+
+
 def _escape_filename(filename: str) -> str:
-    """RFC 2045 quoted-string escaping: backslash first, then double-quote."""
-    return filename.replace("\\", "\\\\").replace('"', '\\"')
+    """RFC 2045 quoted-string escaping for an ASCII filename.
+
+    Strips CR/LF/NUL first (header-injection defense, mirroring
+    :func:`format_display_address`), then escapes backslash and double-quote.
+    """
+    safe = _strip_header_controls(filename)
+    return safe.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _mime_filename_params(filename: str) -> Tuple[str, str]:
+    """Return ``(name_param, filename_param)`` for a MIME part's headers.
+
+    ASCII filenames use the historical quoted-string form (``name="f.pdf"``),
+    kept byte-identical to prior output. Non-ASCII filenames are RFC 2231
+    encoded (``name*=UTF-8''caf%C3%A9.pdf``) so raw UTF-8 never lands in a
+    header. CR/LF/NUL are stripped either way.
+    """
+    try:
+        filename.encode("ascii")
+    except UnicodeEncodeError:
+        enc = encode_rfc2231(_strip_header_controls(filename), "UTF-8")
+        return f"name*={enc}", f"filename*={enc}"
+    esc = _escape_filename(filename)
+    return f'name="{esc}"', f'filename="{esc}"'
 
 
 def _b64_crlf(data: bytes) -> str:
@@ -441,13 +468,13 @@ def _attachment_part(
 ) -> str:
     """Render one ``Content-Disposition: attachment`` MIME part."""
     crlf = "\r\n"
-    escaped_fn = _escape_filename(filename)
+    name_param, filename_param = _mime_filename_params(filename)
     return crlf.join(
         [
             f"--{outer_boundary}",
-            f'Content-Type: {mime_type}; name="{escaped_fn}"',
+            f"Content-Type: {mime_type}; {name_param}",
             "Content-Transfer-Encoding: base64",
-            f'Content-Disposition: attachment; filename="{escaped_fn}"',
+            f"Content-Disposition: attachment; {filename_param}",
             "",
             _b64_crlf(data),
         ]
@@ -459,16 +486,18 @@ def _inline_part(
 ) -> str:
     """Render one ``Content-Disposition: inline`` MIME part (cid image)."""
     crlf = "\r\n"
-    escaped_fn = _escape_filename(filename)
-    # Wrap content_id in angle brackets if not already wrapped.
-    cid = content_id if content_id.startswith("<") else f"<{content_id}>"
+    name_param, filename_param = _mime_filename_params(filename)
+    # Strip CR/LF/NUL from content_id (header-injection defense), then wrap in
+    # angle brackets if not already wrapped.
+    safe_cid = _strip_header_controls(content_id)
+    cid = safe_cid if safe_cid.startswith("<") else f"<{safe_cid}>"
     return crlf.join(
         [
             f"--{outer_boundary}",
-            f'Content-Type: {mime_type}; name="{escaped_fn}"',
+            f"Content-Type: {mime_type}; {name_param}",
             "Content-Transfer-Encoding: base64",
             f"Content-ID: {cid}",
-            f'Content-Disposition: inline; filename="{escaped_fn}"',
+            f"Content-Disposition: inline; {filename_param}",
             "",
             _b64_crlf(data),
         ]

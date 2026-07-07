@@ -114,3 +114,31 @@ async def test_send_via_smtp_connection_error_propagates(monkeypatch):
             "me@example.com",
             "TOKEN123",
         )
+
+
+@pytest.mark.asyncio
+async def test_send_via_smtp_334_challenge_consumed_before_raise(monkeypatch):
+    """A 334 XOAUTH2 challenge must be completed with an empty response before
+    raising, so the SASL exchange is closed and the context manager's QUIT does
+    not throw and mask the real auth error."""
+    import smtplib
+
+    class Challenge334SMTP(FakeSMTP):
+        def docmd(self, cmd, arg=""):
+            self.cmds.append(("docmd", cmd, arg))
+            if cmd == "AUTH":
+                return (334, b"eyJzdGF0dXMiOiI0MDAifQ==")  # base64 error challenge
+            return (535, b"5.7.8 auth failed")  # reply to the empty continuation
+
+    monkeypatch.setattr(t.smtplib, "SMTP", Challenge334SMTP)
+    with pytest.raises(smtplib.SMTPAuthenticationError):
+        await t.send_via_smtp(
+            "me@example.com",
+            ["a@example.com"],
+            b"raw-bytes",
+            "me@example.com",
+            "TOKEN123",
+        )
+    s = FakeSMTP.instances[-1]
+    # An empty-string continuation must have been sent after the AUTH command.
+    assert ("docmd", "", "") in s.cmds

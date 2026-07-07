@@ -18,6 +18,28 @@ EMAIL_RE = re.compile(
 # ordinary text nodes) because they carry display names or attribution text.
 _REDACT_TEXT_ELEMENTS = {"gmail_attr", "gmail_sendername"}
 
+# HTML void elements have no end tag. html.parser fires handle_starttag for a
+# bare one (e.g. <br>) but never a matching handle_endtag, so they must not be
+# pushed onto the class stack or they desync redact-scope tracking.
+_VOID_ELEMENTS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+
 
 def _redact(s: str) -> str:
     return EMAIL_RE.sub("‹email›", s or "")
@@ -184,17 +206,20 @@ class _Sanitizer(HTMLParser):
                     cls_tokens = set(value.split())
         parts.append(">")
         self._out.append("".join(parts))
-        self._class_stack.append(cls_tokens)
+        # Void elements have no end tag, so don't track a scope for them.
+        if tag not in _VOID_ELEMENTS:
+            self._class_stack.append(cls_tokens)
 
     def handle_endtag(self, tag: str) -> None:
         self._out.append(f"</{tag}>")
-        if self._class_stack:
+        if tag not in _VOID_ELEMENTS and self._class_stack:
             self._class_stack.pop()
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # Self-closing tags — treat like start+end with no text children.
         self.handle_starttag(tag, attrs)
-        if self._class_stack:
+        # handle_starttag only pushed for non-void tags; balance that here.
+        if tag not in _VOID_ELEMENTS and self._class_stack:
             self._class_stack.pop()
 
     def handle_data(self, data: str) -> None:

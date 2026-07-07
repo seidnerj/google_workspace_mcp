@@ -2896,8 +2896,10 @@ async def send_gmail_message(
 
     # Resolve send transport before building the raw message so we know whether
     # to include the Bcc header (API keeps it; SMTP omits it — envelope-only).
-    effective, transport_creds, fallback_note = resolve_effective_transport(
-        user_google_email
+    # Off-thread: with the GCS credential-store backend this can do a blocking
+    # download, which must not stall the event loop.
+    effective, transport_creds, fallback_note = await asyncio.to_thread(
+        resolve_effective_transport, user_google_email
     )
 
     # Always use the Gmail-web faithful path for both the no-attachment and
@@ -3128,8 +3130,10 @@ async def _forward_gmail_message_impl(
 
     # Resolve send transport before building the raw message so we know whether
     # to include the Bcc header (API keeps it; SMTP omits it — envelope-only).
-    effective, transport_creds, fallback_note = resolve_effective_transport(
-        user_google_email
+    # Off-thread: with the GCS credential-store backend this can do a blocking
+    # download, which must not stall the event loop.
+    effective, transport_creds, fallback_note = await asyncio.to_thread(
+        resolve_effective_transport, user_google_email
     )
 
     raw_message, _fwd_count, _fwd_errors = _prepare_gmail_message_web(
