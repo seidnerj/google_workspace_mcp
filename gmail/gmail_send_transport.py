@@ -292,8 +292,11 @@ async def _lookup_message_id(
                 f" scope(s))"
             )
 
-        # Scope present — look up by the authored Message-ID.
-        q = f"rfc822msgid:{msgid}"
+        # Scope present — look up by the authored Message-ID. Gmail's
+        # rfc822msgid: search expects the bare id; make_msgid() and header
+        # values carry angle brackets, which would make the lookup miss.
+        bare_msgid = msgid.strip().strip("<>")
+        q = f"rfc822msgid:{bare_msgid}"
         res = await asyncio.to_thread(
             service.users().messages().list(userId="me", q=q, maxResults=1).execute
         )

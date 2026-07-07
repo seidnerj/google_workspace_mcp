@@ -450,6 +450,11 @@ class TestDispatchTransmitSmtpPath:
         assert "rfc822msgid:" in captured["q"], (
             f"Expected rfc822msgid: in query, got: {captured['q']}"
         )
+        # Gmail's rfc822msgid: expects the bare id; angle brackets make it miss.
+        assert "<" not in captured["q"] and ">" not in captured["q"], (
+            f"rfc822msgid: query must use the bare id without angle brackets, "
+            f"got: {captured['q']}"
+        )
 
     @pytest.mark.asyncio
     async def test_smtp_existing_message_id_not_duplicated(self, monkeypatch):
