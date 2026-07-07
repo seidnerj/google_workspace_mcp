@@ -1,14 +1,7 @@
 """Regression tests for check_credentials_directory_permissions.
 
-The original implementation branched on os.path.exists, wrote a SHARED
-'.permission_test' filename, and on failure removed the directory with
-os.rmdir. When multiple MCP server processes (e.g. the personal and work
-google-workspace servers Claude Code launches together) initialize the SAME
-~/.google_workspace_mcp/credentials directory concurrently, those steps race:
-one process's cleanup/remove yanks the dir or the shared probe file out from
-under a sibling, whose write then fails with ENOENT and crashes startup
-("Connection closed" -> server shows as failed). These tests pin the
-concurrency-safe, non-destructive behavior.
+Multiple server processes can initialize the same credentials directory
+concurrently. These tests pin the concurrency-safe, non-destructive behavior.
 """
 
 import os
@@ -19,7 +12,7 @@ from core.utils import check_credentials_directory_permissions
 
 def test_concurrent_checks_on_shared_dir_all_succeed(tmp_path):
     """Many processes initializing the same (initially missing) credentials dir
-    at once must all succeed -- reproduces the startup race."""
+    at once must all succeed."""
     target = str(tmp_path / "credentials")  # does not exist yet
     errors: list[str] = []
     n = 24

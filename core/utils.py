@@ -261,15 +261,9 @@ def check_credentials_directory_permissions(credentials_dir: str = None) -> None
 
         credentials_dir = get_default_credentials_dir()
 
-    # Idempotent and concurrency-safe. Multiple MCP server processes (e.g. the
-    # personal and work google-workspace servers Claude Code launches together)
-    # may initialize the SAME credentials directory at once. Earlier code branched
-    # on os.path.exists, probed with a SHARED ".permission_test" filename, and on
-    # failure removed the directory via os.rmdir -- so one process's cleanup/remove
-    # could yank the dir or probe file out from under a sibling mid-check (a TOCTOU
-    # race that crashed startup with ENOENT). Instead: ensure the dir exists
-    # (exist_ok), probe writability with a UNIQUE temp file that auto-removes, and
-    # never delete the shared directory.
+    # Multiple server processes may initialize the same credentials directory at
+    # once. Keep the check idempotent: create the directory if needed, probe with
+    # a unique temporary file, and never remove the shared directory on failure.
     try:
         os.makedirs(credentials_dir, exist_ok=True)
         with tempfile.NamedTemporaryFile(
