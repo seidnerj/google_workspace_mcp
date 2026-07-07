@@ -398,13 +398,17 @@ async def test_draft_gmail_message_builds_threaded_html_reply_as_multipart_alter
     assert parsed["Subject"] == "Re: Meeting tomorrow"
     assert parsed["To"] == "recipient@example.com"
     assert parsed["In-Reply-To"] == "<msg2@example.com>"
-    assert parsed["References"] == "<msg1@example.com> <msg2@example.com>"
+    # References is folded (CRLF+TAB) per the Gmail-web spec; normalize whitespace.
+    assert " ".join(parsed["References"].split()) == (
+        "<msg1@example.com> <msg2@example.com>"
+    )
     assert parsed.get_content_type() == "multipart/alternative"
     assert parsed.get_body(preferencelist=("plain",)).get_content().strip() == (
         "Thanks for the update."
     )
+    # The HTML part is wrapped in Gmail's ltr container per the web-compose spec.
     assert parsed.get_body(preferencelist=("html",)).get_content().strip() == (
-        "<p>Thanks for the update.</p>"
+        '<div dir="ltr"><p>Thanks for the update.</p></div>'
     )
 
 
@@ -445,9 +449,9 @@ async def test_draft_gmail_message_builds_html_attachments_with_mixed_top_level(
     attachments = list(parsed.iter_attachments())
 
     assert parsed.get_content_type() == "multipart/mixed"
-    assert parsed.get_body(preferencelist=("html",)).get_content().strip() == (
-        "<p>Please see attached.</p>"
-    )
+    # The web-compose path wraps HTML body in Gmail's ltr container.
+    html_content = parsed.get_body(preferencelist=("html",)).get_content().strip()
+    assert "<p>Please see attached.</p>" in html_content
     assert parsed.get_body(preferencelist=("plain",)).get_content().strip() == (
         "Please see attached."
     )
@@ -561,9 +565,10 @@ async def test_draft_gmail_message_autofills_reply_headers_from_thread():
     raw_text = base64.urlsafe_b64decode(raw_message).decode("utf-8", errors="ignore")
 
     assert "In-Reply-To: <msg3@example.com>" in raw_text
+    # References is folded (CRLF+TAB) per spec; normalize whitespace to compare.
     assert (
         "References: <msg1@example.com> <msg2@example.com> <msg3@example.com>"
-        in raw_text
+        in " ".join(raw_text.split())
     )
     assert "threadId" not in create_kwargs["body"]["message"]
 
@@ -596,7 +601,9 @@ async def test_draft_gmail_message_uses_explicit_in_reply_to_when_filling_refere
     raw_text = base64.urlsafe_b64decode(raw_message).decode("utf-8", errors="ignore")
 
     assert "In-Reply-To: <msg2@example.com>" in raw_text
-    assert "References: <msg1@example.com> <msg2@example.com>" in raw_text
+    assert "References: <msg1@example.com> <msg2@example.com>" in " ".join(
+        raw_text.split()
+    )
     assert "<msg3@example.com>" not in raw_text
 
 
@@ -628,7 +635,9 @@ async def test_draft_gmail_message_uses_explicit_references_when_filling_in_repl
     raw_text = base64.urlsafe_b64decode(raw_message).decode("utf-8", errors="ignore")
 
     assert "In-Reply-To: <msg2@example.com>" in raw_text
-    assert "References: <msg1@example.com> <msg2@example.com>" in raw_text
+    assert "References: <msg1@example.com> <msg2@example.com>" in " ".join(
+        raw_text.split()
+    )
     assert "<msg3@example.com>" not in raw_text
 
 
