@@ -457,6 +457,58 @@ class TestDispatchTransmitSmtpPath:
         )
 
     @pytest.mark.asyncio
+    async def test_smtp_sender_normalized_to_bare_address(self, monkeypatch):
+        """A 'Display Name <addr>' sender must reach the SMTP envelope as the bare
+        address, and feed a clean domain to the Message-ID author."""
+        captured = {}
+
+        async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
+            captured["sender"] = sender
+            captured["raw"] = raw_bytes
+            return "OK queued"
+
+        monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
+
+        service = MagicMock()
+
+        def fake_list(userId, q, maxResults=1):
+            result = MagicMock()
+            result.execute = MagicMock(return_value={"messages": []})
+            return result
+
+        service.users.return_value.messages.return_value.list.side_effect = fake_list
+
+        raw_no_msgid = base64.urlsafe_b64encode(
+            b"MIME-Version: 1.0\r\nSubject: hi\r\n\r\nBody"
+        ).decode()
+
+        await t.dispatch_transmit(
+            service,
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=raw_no_msgid,
+            thread_id_final=None,
+            sender="Grace Hopper <grace@example.org>",
+            to=["bob@example.com"],
+            cc=None,
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        assert captured["sender"] == "grace@example.org", (
+            f"envelope sender not normalized: {captured['sender']!r}"
+        )
+        # Message-ID domain must be the bare domain, not mangled by the name.
+        assert b"@example.org>" in captured["raw"]
+        assert b"@grace@" not in captured["raw"]
+
+    @pytest.mark.asyncio
     async def test_smtp_existing_message_id_not_duplicated(self, monkeypatch):
         """If the raw already has a Message-ID, it must not be injected again."""
         captured = {}

@@ -2911,7 +2911,9 @@ async def send_gmail_message(
     # with-attachment cases so every sent message carries the gmail_quote reply
     # trail and web-faithful MIME structure.
     reply_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
+    # thread_id alone triggers auto-derived reply headers on this path, so treat
+    # it as a reply for subject prefixing too, not just an explicit in_reply_to.
+    if (in_reply_to or thread_id) and not subject.lower().startswith("re:"):
         reply_subject = f"Re: {subject}"
     (
         raw_message,

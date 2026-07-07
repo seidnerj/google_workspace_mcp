@@ -5,7 +5,7 @@ import base64
 import logging
 import smtplib
 import ssl
-from email.utils import getaddresses, make_msgid
+from email.utils import getaddresses, make_msgid, parseaddr
 
 from auth.credential_store import get_credential_store
 from auth.scopes import (
@@ -238,6 +238,10 @@ async def _dispatch_smtp(
         await asyncio.to_thread(creds.refresh, Request())
 
     raw_bytes = base64.urlsafe_b64decode(raw_message_b64)
+
+    # Normalize a possible "Display Name <addr>" sender to the bare address so it
+    # is a valid SMTP envelope sender and yields a clean Message-ID domain split.
+    sender = parseaddr(sender)[1] or sender
 
     # Inject a unique Message-ID so we can look up the message after send.
     raw_bytes, msgid = _inject_message_id(raw_bytes, sender)

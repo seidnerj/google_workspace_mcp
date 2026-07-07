@@ -85,6 +85,32 @@ def _people_service_empty():
 
 
 @pytest.mark.asyncio
+async def test_send_thread_only_reply_gets_re_prefix():
+    """A reply identified only by thread_id (no explicit in_reply_to) must still
+    get the 'Re:' subject prefix, since the send path auto-derives reply headers
+    from the thread."""
+    gmail = _gmail_service()
+    people = _people_service_empty()
+    gmail.users.return_value.threads.return_value.get.return_value.execute.return_value = {
+        "messages": []
+    }
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        people_service=people,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Status update",
+        body="hi",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    raw = _raw_sent(gmail)
+    assert "Subject: Re: Status update" in raw
+
+
+@pytest.mark.asyncio
 async def test_send_hebrew_body_renders_rtl():
     """A Hebrew body auto-detects as RTL so Gmail right-aligns it."""
     gmail = _gmail_service()
