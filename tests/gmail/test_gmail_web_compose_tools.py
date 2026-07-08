@@ -773,3 +773,76 @@ async def test_send_with_attachments_derives_reply_headers(monkeypatch):
     assert captured["in_reply_to"] == "<second@example.com>"
     assert "<first@example.com>" in captured["references"]
     assert "<second@example.com>" in captured["references"]
+
+
+def _thread_with_parent_subject(subject: str) -> dict:
+    """A one-message thread whose parent carries *subject* (for reply tests)."""
+    return {
+        "messages": [
+            {
+                "id": "p1",
+                "labelIds": ["INBOX"],
+                "payload": {
+                    "headers": [
+                        {"name": "Message-ID", "value": "<parent@example.com>"},
+                        {"name": "From", "value": "Ada <ada@example.com>"},
+                        {"name": "Subject", "value": subject},
+                        {"name": "Date", "value": "Tue, 7 Apr 2026 19:19:00 +0000"},
+                    ],
+                    "mimeType": "text/plain",
+                    "body": {"data": _encode("Hi")},
+                },
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_reply_inherits_parent_subject_when_omitted():
+    """Replying (thread_id) without a subject inherits the parent's, single Re:."""
+    gmail = _gmail_service()
+    people = _people_service_empty()
+    gmail.users().threads().get().execute.return_value = _thread_with_parent_subject(
+        "Project sync"
+    )
+    gmail.users.return_value.threads.return_value.get.reset_mock()
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        people_service=people,
+        user_google_email="you@example.org",
+        to="ada@example.com",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    raw = _raw_sent(gmail)
+    assert "Subject: Re: Project sync" in raw
+
+
+@pytest.mark.asyncio
+async def test_send_reply_inherited_subject_does_not_double_re_or_strip_tags():
+    """Real-world case: parent already has a list tag + Re:/RE:. Inheriting it
+    must not add a second Re: and must preserve [list] and [#123]."""
+    gmail = _gmail_service()
+    people = _people_service_empty()
+    parent = "[list] Re: RE: Project status [#123]"
+    gmail.users().threads().get().execute.return_value = _thread_with_parent_subject(
+        parent
+    )
+    gmail.users.return_value.threads.return_value.get.reset_mock()
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        people_service=people,
+        user_google_email="you@example.org",
+        to="ada@example.com",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    raw = _raw_sent(gmail)
+    assert f"Subject: {parent}" in raw
+    assert "Subject: Re: [list]" not in raw

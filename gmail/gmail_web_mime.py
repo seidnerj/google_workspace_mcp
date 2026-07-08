@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import html as _html
 import quopri
+import re
 import secrets
 import unicodedata
 from datetime import datetime
@@ -78,6 +79,26 @@ def format_display_address(name: Optional[str], email: str) -> str:
         # Non-ASCII name: RFC2047 encoded-word for the display phrase.
         encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998)
         return f"{encoded_name} <{safe_email}>"
+
+
+# A reply prefix (Re:/RE:) counts as already-present even behind leading list
+# or ticket tags like ``[list]`` -- so inheriting a parent subject never
+# gains a second Re:. Detection only; tags/prefixes are never stripped.
+_REPLY_PREFIX_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)*[Rr][Ee]\s*:")
+
+
+def normalize_reply_subject(subject: str) -> str:
+    """Return *subject* with exactly one leading ``Re:`` reply prefix.
+
+    Prepends ``"Re: "`` only when *subject* is not already a reply. An existing
+    ``Re:``/``RE:`` marker counts even when preceded by leading list/ticket tags
+    (e.g. ``[list] Re: ...``), so a reply that inherits its parent's subject
+    never gains a second ``Re:``. Existing prefixes and bracketed tags are kept
+    verbatim (never stripped). Idempotent.
+    """
+    if _REPLY_PREFIX_RE.match(subject):
+        return subject
+    return f"Re: {subject}"
 
 
 def _escape_body(text: str) -> str:

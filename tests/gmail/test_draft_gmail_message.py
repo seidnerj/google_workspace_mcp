@@ -957,3 +957,35 @@ async def test_send_gmail_message_with_url_attachment(monkeypatch):
     raw_bytes = base64.urlsafe_b64decode(create_kwargs["body"]["raw"])
     assert b"Content-Disposition: attachment;" in raw_bytes
     assert b"doc.pdf" in raw_bytes
+
+
+@pytest.mark.asyncio
+async def test_draft_reply_inherits_parent_subject_when_omitted():
+    """A reply draft with no subject inherits the parent's exact subject; an
+    existing [tag] + Re:/RE: is preserved verbatim (no second Re:)."""
+    mock_service = Mock()
+    mock_service.users().drafts().create().execute.return_value = {"id": "draft_reply"}
+    mock_service.users().threads().get().execute.return_value = {
+        "messages": [
+            _thread_message(
+                "<msg1@example.com>",
+                subject="[list] Re: RE: Project status [#123]",
+                from_value="Alice <alice@example.com>",
+            )
+        ]
+    }
+
+    await _unwrap(draft_gmail_message)(
+        service=mock_service,
+        user_google_email="user@example.com",
+        to="alice@example.com",
+        body="Thanks.",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    create_kwargs = (
+        mock_service.users.return_value.drafts.return_value.create.call_args.kwargs
+    )
+    parsed = _parse_raw_message(create_kwargs["body"]["message"]["raw"])
+    assert parsed["Subject"] == "[list] Re: RE: Project status [#123]"

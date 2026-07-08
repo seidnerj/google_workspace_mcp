@@ -81,6 +81,7 @@ from gmail.gmail_web_mime import (
     format_display_address,
     gmail_boundary,
     new_message_html,
+    normalize_reply_subject,
     plain_body_to_html,
     render_forward_recipients_html,
 )
@@ -901,7 +902,7 @@ async def _build_web_compose_raw(
     gmail_service,
     people_service,
     *,
-    subject: str,
+    subject: Optional[str],
     body: str,
     body_format: Literal["plain", "html"],
     to: Optional[str],
@@ -964,6 +965,22 @@ async def _build_web_compose_raw(
                 thread_names = _harvest_thread_display_names(
                     context.get("messages", [])
                 )
+
+    # Resolve the reply subject. When the caller omitted it (reply mode),
+    # inherit the parent's exact subject so subject-sensitive clients keep the
+    # message in-thread. Add a single "Re: " only when absent -- tag-aware, so
+    # an inherited "[list] Re: ..." never gains a second Re: and tags like
+    # [#123] are preserved verbatim.
+    is_reply = bool(in_reply_to or thread_id)
+    if (subject is None or not subject.strip()) and reply_target:
+        subject = reply_target.get("subject") or subject
+    if is_reply and subject and subject.strip():
+        subject = normalize_reply_subject(subject)
+    if subject is None or not subject.strip():
+        raise UserInputError(
+            "A subject is required. It may be omitted only when replying "
+            "(thread_id/in_reply_to) to a message whose subject can be inherited."
+        )
 
     # Resolve display names for the sender and each recipient list. Thread names
     # cover reply recipients (Scenario 1); the People index covers typed/added
@@ -1773,10 +1790,9 @@ def _prepare_gmail_message(
         Tuple of (raw_message, thread_id, attached_count, attachment_errors)
         where raw_message is base64 encoded.
     """
-    # Handle reply subject formatting
-    reply_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
-        reply_subject = f"Re: {subject}"
+    # Handle reply subject formatting (tag-aware + idempotent, so an inherited
+    # "[list] Re: ..." is not given a second Re:).
+    reply_subject = normalize_reply_subject(subject) if in_reply_to else subject
 
     # Prepare the email
     normalized_format = body_format.lower()
@@ -2637,7 +2653,7 @@ async def send_gmail_message(
     subject: Annotated[
         Optional[str],
         Field(
-            description="Email subject. Required when sending; optional when forwarding (defaults to 'Fwd: <original subject>').",
+            description="Email subject. Required for a new message; optional when replying (thread_id/in_reply_to), where it is inherited from the parent message (with a single tag-aware 'Re:'), or when forwarding (defaults to 'Fwd: <original subject>').",
         ),
     ] = None,
     body: Annotated[
@@ -2715,7 +2731,7 @@ async def send_gmail_message(
     direction: Annotated[
         Literal["auto", "ltr", "rtl"],
         Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body only; the plain-text alternative carries no direction marker (matching Gmail web), so if a client renders the plain-text part standalone, right-to-left content may appear left-aligned.",
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
         ),
     ] = "auto",
 ) -> str:
@@ -2731,7 +2747,10 @@ async def send_gmail_message(
 
     Args:
         to (str): Recipient email address.
-        subject (str): Email subject. Required unless forwarding (then defaults to 'Fwd: <original subject>').
+        subject (str): Email subject. Required for a new message. Optional when replying
+            (thread_id/in_reply_to) - inherited from the parent message, adding a single
+            'Re:' only if absent and preserving tags like '[list]'/'[#123]'. Optional when
+            forwarding (then defaults to 'Fwd: <original subject>').
         body (str): Email body content. Required unless forwarding (then an optional prepended note).
         body_format (Literal['plain', 'html']): Body format (and prepended note format when forwarding). Defaults to 'plain'.
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the tool forwards that message.
@@ -2864,10 +2883,16 @@ async def send_gmail_message(
             direction=direction,
         )
 
-    if subject is None or body is None:
+    # 'subject' may be omitted when replying (thread_id/in_reply_to): it is then
+    # inherited from the parent message. It is still required for a brand-new
+    # message. 'body' is always required (optional only when forwarding, handled
+    # above).
+    is_reply = bool(thread_id or in_reply_to)
+    if body is None or (subject is None and not is_reply):
         raise UserInputError(
-            "Both 'subject' and 'body' are required when sending a message "
-            "(they are optional only when forwarding via 'forward_message_id')."
+            "'body' is required, and 'subject' is required unless replying "
+            "(thread_id/in_reply_to, where it is inherited from the parent) or "
+            "forwarding via 'forward_message_id'."
         )
 
     logger.info(
@@ -2910,11 +2935,9 @@ async def send_gmail_message(
     # Always use the Gmail-web faithful path for both the no-attachment and
     # with-attachment cases so every sent message carries the gmail_quote reply
     # trail and web-faithful MIME structure.
-    reply_subject = subject
-    # thread_id alone triggers auto-derived reply headers on this path, so treat
-    # it as a reply for subject prefixing too, not just an explicit in_reply_to.
-    if (in_reply_to or thread_id) and not subject.lower().startswith("re:"):
-        reply_subject = f"Re: {subject}"
+    # Subject prefixing/inheritance is centralized in _build_web_compose_raw
+    # (it has the parent message in hand): a reply with subject omitted inherits
+    # the parent's, and a single tag-aware "Re: " is applied there.
     (
         raw_message,
         had_unresolved,
@@ -2924,7 +2947,7 @@ async def send_gmail_message(
     ) = await _build_web_compose_raw(
         service,
         people_service,
-        subject=reply_subject,
+        subject=subject,
         body=send_body_content,
         body_format=body_format,
         to=to,
@@ -2975,7 +2998,9 @@ async def send_gmail_message(
         to=[to] if to else None,
         cc=[cc] if cc else None,
         bcc=[bcc] if bcc else None,
-        subject=reply_subject,
+        # Display/label only; the authoritative Subject header is already baked
+        # into raw_message (inherited/prefixed inside _build_web_compose_raw).
+        subject=subject or "",
         user_google_email=user_google_email,
         action_label="Email sent",
         attachment_info=attachment_info,
@@ -3213,7 +3238,12 @@ async def draft_gmail_message(
     user_google_email: str,
     *,
     people_service=None,
-    subject: Annotated[str, Field(description="Email subject.")],
+    subject: Annotated[
+        Optional[str],
+        Field(
+            description="Email subject. Optional when replying (thread_id/in_reply_to): if omitted, the parent message's subject is inherited, with a single 'Re:' added only when absent and existing tags like '[list]'/'[#123]' preserved.",
+        ),
+    ] = None,
     body: Annotated[str, Field(description="Email body (plain text).")],
     body_format: Annotated[
         Literal["plain", "html"],
@@ -3284,7 +3314,7 @@ async def draft_gmail_message(
     direction: Annotated[
         Literal["auto", "ltr", "rtl"],
         Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body only; the plain-text alternative carries no direction marker (matching Gmail web), so if a client renders the plain-text part standalone, right-to-left content may appear left-aligned.",
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script → right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
         ),
     ] = "auto",
 ) -> str:
@@ -3294,7 +3324,9 @@ async def draft_gmail_message(
 
     Args:
         user_google_email (str): The user's Google email address. Required for authentication.
-        subject (str): Email subject.
+        subject (str): Email subject. Optional when replying (thread_id/in_reply_to):
+            if omitted, inherited from the parent message, adding a single 'Re:' only if
+            absent and preserving tags like '[list]'/'[#123]'.
         body (str): Email body (plain text).
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         to (Optional[str]): Optional recipient email address. Can be left empty for drafts.
@@ -3402,7 +3434,13 @@ async def draft_gmail_message(
             signature_html = send_as_entry.get("signature", "") or ""
 
     reply_context = None
-    if thread_id and (quote_original or not in_reply_to or not references or not to):
+    if thread_id and (
+        quote_original
+        or not in_reply_to
+        or not references
+        or not to
+        or not (subject and subject.strip())
+    ):
         reply_context = await _fetch_thread_reply_context(
             service,
             thread_id,
@@ -3428,13 +3466,8 @@ async def draft_gmail_message(
     )
     if thread_id and not to and target_reply:
         to = target_reply.get("reply_to") or target_reply.get("from") or to
-    if thread_id and not subject.strip() and target_reply:
-        subject = target_reply.get("subject") or subject
-
-    # Apply the subject reply-prefix here (the web path expects the final subject).
-    draft_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
-        draft_subject = f"Re: {subject}"
+    # Subject inheritance (when omitted) and tag-aware, single "Re:" prefixing
+    # are centralized in _build_web_compose_raw, which has the parent in hand.
 
     resolved_attachments = await _resolve_url_attachments(attachments)
 
@@ -3450,7 +3483,7 @@ async def draft_gmail_message(
     ) = await _build_web_compose_raw(
         service,
         people_service,
-        subject=draft_subject,
+        subject=subject,
         body=draft_body,
         body_format=body_format,
         to=to,

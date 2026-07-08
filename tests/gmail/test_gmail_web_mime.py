@@ -743,3 +743,50 @@ class TestFilenameHeaderSafety:
         assert "café.pdf" not in part
         assert "name*=UTF-8''caf%C3%A9.pdf" in part
         assert "filename*=UTF-8''caf%C3%A9.pdf" in part
+
+
+class TestNormalizeReplySubject:
+    """Reply-subject normalization: single Re:, tag-preserving, idempotent."""
+
+    def test_plain_subject_gets_single_re_prefix(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        assert normalize_reply_subject("Project update") == "Re: Project update"
+
+    def test_existing_re_is_not_doubled(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        assert normalize_reply_subject("Re: Project update") == "Re: Project update"
+
+    def test_uppercase_re_is_treated_as_reply(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        assert normalize_reply_subject("RE: Project update") == "RE: Project update"
+
+    def test_list_tag_before_existing_re_is_left_verbatim(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        # The real-world Zendesk case: leading [tag] then an existing Re:/RE:.
+        # Must not gain another "Re:" and must keep the tag and ticket marker.
+        subject = "[list] Re: RE: Project status [#123]"
+        assert normalize_reply_subject(subject) == subject
+
+    def test_list_tag_without_re_gets_single_re_and_keeps_tag(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        assert (
+            normalize_reply_subject("[list] Project status [#123]")
+            == "Re: [list] Project status [#123]"
+        )
+
+    def test_is_idempotent(self):
+        from gmail.gmail_web_mime import normalize_reply_subject
+
+        for s in [
+            "Project update",
+            "Re: Project update",
+            "[list] Re: RE: X [#1]",
+            "[list] X",
+        ]:
+            once = normalize_reply_subject(s)
+            assert normalize_reply_subject(once) == once
