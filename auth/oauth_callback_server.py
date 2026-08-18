@@ -386,6 +386,10 @@ class MinimalOAuthServer:
                     port=self.port,
                     log_level="warning",
                     access_log=False,
+                    # Match FastMCP's own uvicorn config: uvicorn's "auto"
+                    # default resolves to the deprecated legacy-websockets
+                    # implementation whenever `websockets` is installed.
+                    ws="websockets-sansio",
                 )
                 if self._ephemeral:
                     # Cap graceful shutdown so a lingering keep-alive connection
