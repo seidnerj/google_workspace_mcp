@@ -86,6 +86,7 @@ from gmail.gmail_helpers import (
     format_filter_apply_result,
     html_newlines_to_br,
     html_to_text_preserving_breaks,
+    normalize_reply_subject,
     update_gmail_filter,
 )
 
@@ -1335,10 +1336,7 @@ def _prepare_gmail_message(
         Tuple of (raw_message, thread_id, attached_count, attachment_errors)
         where raw_message is base64 encoded.
     """
-    # Handle reply subject formatting
-    reply_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
-        reply_subject = f"Re: {subject}"
+    reply_subject = normalize_reply_subject(subject) if in_reply_to else subject
 
     # Prepare the email
     normalized_format = body_format.lower()
@@ -2547,7 +2545,7 @@ async def send_gmail_message(
     subject: Annotated[
         Optional[str],
         Field(
-            description="Email subject. Required when sending; optional when forwarding (defaults to 'Fwd: <original subject>').",
+            description="Email subject. Required for a new message. Optional when replying with thread_id (inherits the parent message's subject, adding 'Re:' only if absent) or when forwarding (defaults to 'Fwd: <original subject>').",
         ),
     ] = None,
     body: Annotated[
@@ -2656,7 +2654,9 @@ async def send_gmail_message(
 
     Args:
         to (str): Recipient email address.
-        subject (str): Email subject. Required unless forwarding (then defaults to 'Fwd: <original subject>').
+        subject (str): Email subject. Required for a new message. Optional when replying
+            with thread_id (inherits the parent message's subject, adding 'Re:' only if
+            absent) or when forwarding (then defaults to 'Fwd: <original subject>').
         body (str): Email body content. Required unless forwarding (then an optional prepended note).
         body_format (Literal['plain', 'html']): Body format (and prepended note format when forwarding). Defaults to 'plain'.
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the tool forwards that message.
@@ -2814,10 +2814,11 @@ async def send_gmail_message(
             user_google_email=user_google_email,
         )
 
-    if subject is None or body is None:
+    if body is None or (subject is None and not thread_id):
         raise UserInputError(
-            "Both 'subject' and 'body' are required when sending a message "
-            "(they are optional only when forwarding via 'forward_message_id')."
+            "'body' is required, and 'subject' is required unless replying with "
+            "thread_id (it is then inherited from the parent message) or "
+            "forwarding via 'forward_message_id'."
         )
 
     if reply_all and not thread_id:
@@ -2844,7 +2845,13 @@ async def send_gmail_message(
     # thread, so a caller should not have to assemble them by hand. Mirrors
     # draft_gmail_message; one thread fetch serves all three.
     reply_context = None
-    if thread_id and (quote_original or reply_all or not in_reply_to or not references):
+    if thread_id and (
+        quote_original
+        or reply_all
+        or not (subject or "").strip()
+        or not in_reply_to
+        or not references
+    ):
         reply_context = await _fetch_thread_reply_context(
             service,
             thread_id,
@@ -2868,6 +2875,12 @@ async def send_gmail_message(
     if not to:
         raise UserInputError(
             f"Could not derive a recipient from thread '{thread_id}'. Pass 'to' explicitly."
+        )
+    if not (subject or "").strip() and target_reply:
+        subject = target_reply.get("subject") or subject
+    if subject is None:
+        raise UserInputError(
+            f"Could not inherit a subject from thread '{thread_id}'. Pass 'subject' explicitly."
         )
 
     # Optionally append the Gmail signature from send-as settings, mirroring
@@ -3306,7 +3319,13 @@ async def draft_gmail_message(
     signature_html = resolved_signature_html if include_signature else ""
 
     reply_context = None
-    if thread_id and (quote_original or not in_reply_to or not references or not to):
+    if thread_id and (
+        quote_original
+        or not subject.strip()
+        or not in_reply_to
+        or not references
+        or not to
+    ):
         reply_context = await _fetch_thread_reply_context(
             service,
             thread_id,
