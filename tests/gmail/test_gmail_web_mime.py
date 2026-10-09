@@ -565,3 +565,26 @@ class TestNonAsciiRecipientEncoding:
 
         with pytest.raises(ValueError, match="line breaks"):
             self._build(to="José <jose@example.com>\r\nBcc: evil@example.com")
+
+
+class TestForcedDirectionOnExistingWrapper:
+    """An explicit direction overrides a caller's leading <div dir=...>."""
+
+    def _html(self, body, direction):
+        from gmail.gmail_tools import _derive_web_bodies
+
+        return _derive_web_bodies(body, "html", direction)[1]
+
+    def test_forced_ltr_replaces_rtl_wrapper(self):
+        assert self._html('<div dir="rtl">Hello</div>', "ltr") == (
+            '<div dir="ltr">Hello</div>'
+        )
+
+    def test_forced_rtl_replaces_ltr_wrapper(self):
+        assert self._html("  <div dir='ltr' class=x>Hi</div>", "rtl") == (
+            '  <div dir="rtl" class=x>Hi</div>'
+        )
+
+    def test_auto_keeps_existing_wrapper(self):
+        body = '<div dir="rtl">Hello</div>'
+        assert self._html(body, "auto") == body

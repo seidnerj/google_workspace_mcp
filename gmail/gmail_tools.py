@@ -1310,6 +1310,11 @@ async def _resolve_url_attachments(
     return resolved
 
 
+# A body that already opens with a ``<div dir=...>`` container; group ``dir``
+# spans the attribute value (quoted or bare).
+_LEADING_DIR_DIV_RE = re.compile(r"\s*<div dir=(?P<dir>\"[^\"]*\"|'[^']*'|[^\s>]+)")
+
+
 def _derive_web_bodies(
     body: str,
     body_format: Literal["plain", "html"],
@@ -1328,11 +1333,15 @@ def _derive_web_bodies(
             if direction == "auto"
             else direction
         )
-        html_part = (
-            body
-            if body.lstrip().startswith("<div dir=")
-            else new_message_html(body, resolved_dir)
-        )
+        wrapper = _LEADING_DIR_DIV_RE.match(body)
+        if wrapper is None:
+            html_part = new_message_html(body, resolved_dir)
+        elif direction == "auto":
+            # Keep the caller's own container and its direction.
+            html_part = body
+        else:
+            # An explicit direction wins over the caller's container.
+            html_part = f'{body[: wrapper.start("dir")]}"{direction}"{body[wrapper.end("dir") :]}'
         return html_to_text_preserving_breaks(body).strip(), html_part
     resolved_dir = base_text_direction(body) if direction == "auto" else direction
     return body, new_message_html(plain_body_to_html(body), resolved_dir)
