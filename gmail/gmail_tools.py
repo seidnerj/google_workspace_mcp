@@ -3126,8 +3126,13 @@ async def _forward_gmail_message_impl(
 async def draft_gmail_message(
     service,
     user_google_email: str,
-    subject: Annotated[str, Field(description="Email subject.")],
     body: Annotated[str, Field(description="Email body (plain text).")],
+    subject: Annotated[
+        Optional[str],
+        Field(
+            description="Email subject. Required for a new draft. Optional when replying with thread_id (inherits the parent message's subject, adding 'Re:' only if absent).",
+        ),
+    ] = None,
     body_format: Annotated[
         Literal["plain", "html"],
         Field(
@@ -3210,8 +3215,10 @@ async def draft_gmail_message(
 
     Args:
         user_google_email (str): The user's Google email address. Required for authentication.
-        subject (str): Email subject.
         body (str): Email body (plain text).
+        subject (Optional[str]): Email subject. Required for a new draft. Optional when
+            replying with thread_id: a blank subject inherits the parent message's
+            subject, and the call fails if the parent has none.
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         to (Optional[str]): Optional recipient email address. Can be left empty for drafts.
         cc (Optional[str]): Optional CC email address.
@@ -3322,10 +3329,16 @@ async def draft_gmail_message(
     draft_body = html_newlines_to_br(body) if body_format == "html" else body
     signature_html = resolved_signature_html if include_signature else ""
 
+    if not thread_id and not (subject or "").strip():
+        raise UserInputError(
+            "'subject' is required for a new draft. It may be omitted only when "
+            "replying with thread_id, where it is inherited from the parent message."
+        )
+
     reply_context = None
     if thread_id and (
         quote_original
-        or not subject.strip()
+        or not (subject or "").strip()
         or not in_reply_to
         or not references
         or not to
@@ -3348,8 +3361,12 @@ async def draft_gmail_message(
 
     if thread_id and not to and target_reply:
         to = target_reply.get("reply_to") or target_reply.get("from") or to
-    if thread_id and not subject.strip() and target_reply:
-        subject = target_reply.get("subject") or subject
+    if thread_id and not (subject or "").strip():
+        subject = (target_reply or {}).get("subject") or ""
+        if not subject.strip():
+            raise UserInputError(
+                f"Could not inherit a subject from thread '{thread_id}'. Pass 'subject' explicitly."
+            )
 
     if quote_original and target_reply:
         draft_body = _build_quoted_reply_body(

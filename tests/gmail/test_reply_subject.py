@@ -59,6 +59,7 @@ def _service_with_parent(subject: str) -> Mock:
         ]
     }
     service.users().messages().send.reset_mock()
+    service.users().drafts().create.reset_mock()
     return service
 
 
@@ -263,3 +264,52 @@ async def test_send_reply_whitespace_subject_inherits_parent_subject():
     )
 
     assert _sent_subject(service) == "Re: Project sync"
+
+
+@pytest.mark.asyncio
+async def test_draft_reply_inherits_subject_when_subject_omitted():
+    service = _service_with_parent("Project sync")
+
+    await _unwrap(draft_gmail_message)(
+        service=service,
+        user_google_email="you@example.org",
+        to="ada@example.com",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    assert _drafted_subject(service) == "Re: Project sync"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject", [None, "", "   "])
+async def test_draft_reply_without_inheritable_subject_raises(subject):
+    service = _service_with_parent("")
+
+    with pytest.raises(UserInputError, match="subject"):
+        await _unwrap(draft_gmail_message)(
+            service=service,
+            user_google_email="you@example.org",
+            to="ada@example.com",
+            subject=subject,
+            body="Thanks!",
+            thread_id="thread123",
+            include_signature=False,
+        )
+    service.users().drafts().create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_draft_new_message_still_requires_subject():
+    service = _service_with_parent("unused")
+
+    with pytest.raises(UserInputError, match="subject"):
+        await _unwrap(draft_gmail_message)(
+            service=service,
+            user_google_email="you@example.org",
+            to="ada@example.com",
+            body="Hello",
+            include_signature=False,
+        )
+    service.users().drafts().create.assert_not_called()
