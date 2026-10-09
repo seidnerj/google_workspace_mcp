@@ -851,3 +851,52 @@ class TestFormatAddressListParsing:
         assert self._decoded("Undisclosed:;, José <j@example.com>") == (
             "Undisclosed:;, José <j@example.com>"
         )
+
+    def test_truncated_angle_address_raises_value_error(self):
+        import pytest
+
+        from gmail.gmail_web_mime import format_address_list, parse_address_list
+
+        # The stdlib parser raises IndexError on these; the contract is ValueError.
+        for value in ("José <", "é: <"):
+            with pytest.raises(ValueError, match="Invalid address list"):
+                format_address_list(value)
+        for value in ("José <", "a <", "é: <"):
+            with pytest.raises(ValueError, match="Invalid address list"):
+                parse_address_list(value)
+
+    def test_folded_names_use_crlf_not_bare_lf(self):
+        from gmail.gmail_web_mime import format_address_list
+
+        # Long enough that the RFC 2047 encoding folds past the 998-char limit.
+        long_name = "é" * 400
+        for value in (
+            f"{long_name} <j@example.com>",
+            f"{long_name}: a@example.com;",
+        ):
+            out = format_address_list(value)
+            assert "\r\n" in out, out
+            assert "\n" not in out.replace("\r\n", ""), out
+
+    def test_malformed_ascii_entry_is_rejected(self):
+        import pytest
+
+        from gmail.gmail_web_mime import format_address_list
+
+        for value in (
+            "alice@example.com, broken <, bob@example.com",
+            "ada@example.com; alan@example.com",
+            "Ada",
+        ):
+            with pytest.raises(ValueError, match="Invalid address list"):
+                format_address_list(value)
+
+    def test_valid_ascii_list_is_returned_byte_identical(self):
+        from gmail.gmail_web_mime import format_address_list
+
+        for value in (
+            "Ada Lovelace <ada@example.com>,  alan@example.com",
+            "Team: a@example.com;, o@example.com",
+            "ada@example.com,,grace@example.com",
+        ):
+            assert format_address_list(value) == value
