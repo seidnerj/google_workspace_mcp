@@ -936,3 +936,25 @@ def test_name_fallback_note_uses_oauth21_instruction(monkeypatch):
     monkeypatch.setattr(gmail_tools, "is_external_oauth21_provider", lambda: True)
     note = gmail_tools._build_name_fallback_note(True, None)
     assert "bearer token" in note
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_format", ["plain", "html"])
+async def test_send_with_attachment_honors_direction(body_format):
+    """Attachments take the web path too, so direction still applies."""
+    gmail = _gmail_service()
+    body = "<div>OK שלום</div>" if body_format == "html" else "OK שלום"
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Project sync",
+        body=body,
+        body_format=body_format,
+        direction="rtl",
+        attachments=[{"filename": "a.txt", "content": "eA=="}],
+        include_signature=False,
+    )
+
+    assert '<div dir="rtl">' in _html_part(_raw_sent(gmail))

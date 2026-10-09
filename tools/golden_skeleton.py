@@ -45,15 +45,100 @@ def _redact(s: str) -> str:
     return EMAIL_RE.sub("‹email›", s or "")
 
 
-def _tag_list(html: str) -> list[str]:
-    """Return the sequence of HTML tags with attributes; text nodes dropped; emails+hrefs redacted."""
-    tags = re.findall(r"<[^>]+>", html)
+# Attributes whose values are structural (Gmail scaffolding) and kept verbatim.
+# ``style`` is kept only after per-declaration redaction; every other attribute
+# value (title, alt, data-*, href, src, ...) can carry names or other personal
+# text and is replaced with a placeholder.
+_STRUCTURAL_ATTRS = frozenset({"class", "dir"})
+_URL_ATTRS = frozenset({"href", "src"})
+_CSS_KEYWORDS = frozenset(
+    {
+        "auto",
+        "bold",
+        "center",
+        "dashed",
+        "dotted",
+        "hidden",
+        "inherit",
+        "initial",
+        "italic",
+        "left",
+        "ltr",
+        "none",
+        "normal",
+        "right",
+        "rtl",
+        "solid",
+        "transparent",
+    }
+)
+_CSS_TOKEN_RE = re.compile(
+    r"-?(?:\d+\.?\d*|\.\d+)(?:px|ex|em|rem|pt|%)?"
+    r"|#[0-9a-fA-F]{3,8}"
+    r"|rgba?\(\s*[\d.]+(?:\s*,\s*[\d.]+){2,3}\s*\)"
+)
+
+
+def _redact_css_value(value: str) -> str:
+    tokens = re.findall(r"rgba?\([^)]*\)|[^\s,]+", value)
+    safe = all(t.lower() in _CSS_KEYWORDS or _CSS_TOKEN_RE.fullmatch(t) for t in tokens)
+    return value if safe else "‹v›"
+
+
+def _redact_style(style: str) -> str:
+    """Keep each declaration's property and only purely structural values."""
     out = []
-    for t in tags:
-        t = _redact(t)
-        t = re.sub(r'href="[^"]*"', 'href="‹h›"', t)
-        out.append(t)
-    return out
+    for decl in style.split(";"):
+        if ":" not in decl:
+            out.append("‹v›" if decl.strip() else decl)
+            continue
+        prop, value = decl.split(":", 1)
+        out.append(f"{prop}:{_redact_css_value(value)}")
+    return ";".join(out)
+
+
+def _redact_attr(name: str, value: str) -> str:
+    if name in _STRUCTURAL_ATTRS:
+        return _redact(value)
+    if name == "style":
+        return _redact_style(value)
+    if name in _URL_ATTRS:
+        return "‹h›"
+    return "‹v›"
+
+
+def _format_tag(tag: str, attrs: list[tuple[str, str | None]], close: str = ">") -> str:
+    parts = [f"<{tag}"]
+    for name, value in attrs:
+        if value is None:
+            parts.append(f" {name}")
+        else:
+            parts.append(f' {name}="{_redact_attr(name, value)}"')
+    parts.append(close)
+    return "".join(parts)
+
+
+class _TagCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.tags.append(_format_tag(tag, attrs))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.tags.append(_format_tag(tag, attrs, close="/>"))
+
+    def handle_endtag(self, tag: str) -> None:
+        self.tags.append(f"</{tag}>")
+
+
+def _tag_list(html: str) -> list[str]:
+    """Return the sequence of HTML tags; text dropped, attribute values redacted."""
+    collector = _TagCollector()
+    collector.feed(html)
+    collector.close()
+    return collector.tags
 
 
 def _literal_probes(html: str) -> dict:
@@ -88,7 +173,7 @@ def _literal_probes(html: str) -> dict:
 
     m = re.search(r'<blockquote class="gmail_quote" style="([^"]*)"', html)
     if m:
-        probes["blockquote_style"] = m.group(1)
+        probes["blockquote_style"] = _redact_style(m.group(1))
 
     return probes
 
@@ -104,10 +189,9 @@ def _plain_line_structure(text: str) -> list[str]:
         elif line.startswith("> "):
             out.append("QUOTE(> )")
         elif re.match(r"^On .*wrote:$", line):
-            out.append(
-                "ATTR_LINE: "
-                + re.sub(r"(On .*?, ).*", r"\1‹name› ‹email› wrote:", line)
-            )
+            # Fixed placeholders only: nothing from the line itself survives.
+            date = "‹date›, " if "," in line else ""
+            out.append(f"ATTR_LINE: On {date}‹name› ‹email› wrote:")
         elif re.match(r"^-{6,} Forwarded message -{6,}$", line):
             out.append("FWD_SEP: " + line)
         elif re.match(r"^(From|Date|Subject|To|Cc):", line):
@@ -134,7 +218,9 @@ def _build_mime_tree(msg) -> dict:
 
     if msg.is_multipart():
         boundary = msg.get_boundary() or ""
-        node["boundary_pattern"] = re.sub(r"[0-9a-f]", "x", boundary)
+        # Mask every alphanumeric so a boundary cannot carry a name; the
+        # length and punctuation still show its shape.
+        node["boundary_pattern"] = re.sub(r"[0-9A-Za-z]", "x", boundary)
         node["parts"] = [_build_mime_tree(p) for p in msg.get_payload()]
 
     return node
@@ -164,7 +250,7 @@ def _get_html_and_plain(msg) -> tuple[str, str]:
 
 
 class _Sanitizer(HTMLParser):
-    """Drop text nodes; redact emails and hrefs in tag attributes.
+    """Drop text nodes; keep only structural attribute values.
 
     Special handling: text inside elements with class ``gmail_attr`` or
     ``gmail_sendername`` is also suppressed (those elements carry attribution
@@ -183,19 +269,10 @@ class _Sanitizer(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         cls_tokens: set[str] = set()
-        parts = [f"<{tag}"]
         for name, value in attrs:
-            if value is None:
-                parts.append(f" {name}")
-            elif name == "href":
-                parts.append(f' {name}="‹h›"')
-            else:
-                redacted = _redact(value)
-                parts.append(f' {name}="{redacted}"')
-                if name == "class":
-                    cls_tokens = set(value.split())
-        parts.append(">")
-        self._out.append("".join(parts))
+            if name == "class" and value:
+                cls_tokens = set(value.split())
+        self._out.append(_format_tag(tag, attrs))
         # Void elements have no end tag, so don't track a scope for them.
         if tag not in _VOID_ELEMENTS:
             self._class_stack.append(cls_tokens)
@@ -237,11 +314,11 @@ def sanitize_html(html: str) -> str:
     - Text nodes are dropped entirely.
     - Text *inside* ``gmail_attr`` and ``gmail_sendername`` elements is also
       suppressed (fixes attribution / sender-name leakage).
-    - Email addresses in attributes are replaced with a placeholder.
-    - ``href`` attribute values are replaced with a placeholder.
-    - Tag names, remaining attributes (class, style, dir, …), and Gmail
-      literal scaffolding tokens (e.g. ``Forwarded message``) embedded in
-      tag attributes are preserved verbatim.
+    - ``class`` and ``dir`` values are kept (email addresses redacted).
+    - ``style`` keeps each property name and only purely structural values
+      (lengths, colors, CSS keywords); anything else becomes a placeholder.
+    - ``href``/``src`` and every other attribute value (title, alt, data-*,
+      ...) are replaced with a placeholder, since they can carry names.
     """
     parser = _Sanitizer()
     parser.feed(html)
@@ -267,11 +344,11 @@ def extract_skeleton(raw_bytes: bytes) -> dict:
     ``mime_tree``
         List containing the single root MIME tree node (a dict); multipart
         nodes carry a ``parts`` list of child nodes and a ``boundary_pattern``
-        (boundary with hex digits masked to ``x``).
+        (boundary with every letter and digit masked to ``x``).
 
     ``html_tags``
-        List of raw tag strings extracted from the HTML part, with email
-        addresses and hrefs redacted.
+        List of tag strings extracted from the HTML part, with every
+        non-structural attribute value redacted.
 
     ``html_probes``
         Dict of boolean / string probes for known Gmail scaffolding markers.
