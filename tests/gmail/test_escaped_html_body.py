@@ -38,9 +38,19 @@ ESCAPED_BODY = (
 )
 
 
-def test_rejects_fully_escaped_html_body():
+NUMERIC_ESCAPED_BODY = (
+    '&#60;div dir="rtl"&#62;&#60;p&#62;שלום&#60;/p&#62;&#60;/div&#62;'
+)
+HEX_ESCAPED_BODY = "&#x3C;p&#x3e;Hello&#x3c;/p&#X3E;"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [ESCAPED_BODY, NUMERIC_ESCAPED_BODY, HEX_ESCAPED_BODY, "&LT;p&GT;Hi&LT;/p&GT;"],
+)
+def test_rejects_fully_escaped_html_body(body):
     with pytest.raises(UserInputError) as excinfo:
-        _reject_entity_escaped_html_body(ESCAPED_BODY, "html")
+        _reject_entity_escaped_html_body(body, "html")
     assert "entity-escaped" in str(excinfo.value)
 
 
@@ -54,6 +64,9 @@ def test_rejects_fully_escaped_html_body():
         ('<p>Wrap it in &lt;div dir="rtl"&gt; like this.</p>', "html"),
         # Escaped tag mentioned mid-body rather than opening it.
         ("<p>Use &lt;br&gt; for a line break.</p>", "html"),
+        ("<p>Use &#60;br&#62; for a line break.</p>", "html"),
+        # Opens with an unrelated numeric reference, not an escaped '<'.
+        ("&#169; 2025 Example", "html"),
         # Same escaped body, but the caller asked for plain: the entities are
         # then plausibly intentional and plain bodies are escaped downstream.
         (ESCAPED_BODY, "plain"),
@@ -68,7 +81,8 @@ def test_allows_legitimate_bodies(body, body_format):
 
 
 @pytest.mark.asyncio
-async def test_send_gmail_message_rejects_escaped_body():
+@pytest.mark.parametrize("body", [ESCAPED_BODY, NUMERIC_ESCAPED_BODY])
+async def test_send_gmail_message_rejects_escaped_body(body):
     mock_service = Mock()
     with pytest.raises(UserInputError):
         await _unwrap(send_gmail_message)(
@@ -76,7 +90,7 @@ async def test_send_gmail_message_rejects_escaped_body():
             user_google_email="user@example.com",
             to="recipient@example.com",
             subject="דוח 2025",
-            body=ESCAPED_BODY,
+            body=body,
             body_format="html",
             include_signature=False,
         )
@@ -85,7 +99,8 @@ async def test_send_gmail_message_rejects_escaped_body():
 
 
 @pytest.mark.asyncio
-async def test_draft_gmail_message_rejects_escaped_body():
+@pytest.mark.parametrize("body", [ESCAPED_BODY, NUMERIC_ESCAPED_BODY])
+async def test_draft_gmail_message_rejects_escaped_body(body):
     mock_service = Mock()
     with pytest.raises(UserInputError):
         await _unwrap(draft_gmail_message)(
@@ -93,7 +108,7 @@ async def test_draft_gmail_message_rejects_escaped_body():
             user_google_email="user@example.com",
             to="recipient@example.com",
             subject="דוח 2025",
-            body=ESCAPED_BODY,
+            body=body,
             body_format="html",
             include_signature=False,
         )

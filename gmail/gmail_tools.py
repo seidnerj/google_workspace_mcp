@@ -683,8 +683,13 @@ async def _fetch_original_for_quote(
 # A body whose markup arrived HTML-entity-escaped ("&lt;div ...&gt;" rather than
 # "<div ...>"). The opening-tag pattern is anchored at the first non-space
 # character so a body that merely mentions an escaped tag mid-sentence is not
-# matched.
-_ESCAPED_HTML_OPENING_TAG = re.compile(r"^\s*&lt;\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|&gt;)")
+# matched. Named, decimal and hex references all decode to the same '<' and '>'.
+_ESCAPED_LT = r"&(?:lt|#0*60|#x0*3c);"
+_ESCAPED_GT = r"&(?:gt|#0*62|#x0*3e);"
+_ESCAPED_HTML_OPENING_TAG = re.compile(
+    rf"^\s*{_ESCAPED_LT}\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|{_ESCAPED_GT})",
+    re.IGNORECASE,
+)
 _RAW_HTML_TAG = re.compile(r"<\s*/?\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|>)")
 
 
@@ -702,14 +707,14 @@ def _reject_entity_escaped_html_body(
     contain no raw tag anywhere. A genuine HTML body that quotes ``&lt;div&gt;``
     as sample text also carries real markup, so it is left alone.
     """
-    if not body or body_format.lower() != "html" or "&lt;" not in body:
+    if not body or body_format.lower() != "html":
         return
     if not _ESCAPED_HTML_OPENING_TAG.match(body) or _RAW_HTML_TAG.search(body):
         return
     raise UserInputError(
         "body_format='html' but the body's markup is HTML-entity-escaped: it "
-        "opens with '&lt;' and contains no real tag, so the recipient would see "
-        "the tags as literal text. Resend with unescaped markup (write '<div "
+        "opens with an escaped '<' ('&lt;' or '&#60;') and contains no real "
+        "tag, so the recipient would see the tags as literal text. Resend with unescaped markup (write '<div "
         "dir=\"rtl\">', not '&lt;div dir=\"rtl\"&gt;'), or pass body_format='plain' "
         "if those entities are intentional."
     )
