@@ -22,7 +22,7 @@ from email.header import Header
 from email.errors import InvalidHeaderDefect
 from email.headerregistry import HeaderRegistry
 from email.utils import encode_rfc2231, formataddr
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 
 # Gmail's byte-identical blockquote style string for quoted replies.
@@ -93,9 +93,21 @@ def format_address_list(value: str) -> str:
     """
     if value.isascii():
         return value
+    return join_address_groups(
+        (group_name, [format_display_address(n, a) for n, a in members])
+        for group_name, members in parse_address_list(value)
+    )
+
+
+def join_address_groups(groups: Iterable[Tuple[Optional[str], List[str]]]) -> str:
+    """Serialize ``(group_name, [formatted mailbox, ...])`` as an address list.
+
+    Ungrouped mailboxes (``group_name`` None) are joined as-is; a named group is
+    emitted as ``Name: a, b;`` with its label quoted or RFC 2047 encoded.
+    """
     out: List[str] = []
-    for group_name, members in parse_address_list(value):
-        formatted = ", ".join(format_display_address(n, a) for n, a in members)
+    for group_name, members in groups:
+        formatted = ", ".join(members)
         if group_name is None:
             out.append(formatted)
         else:
