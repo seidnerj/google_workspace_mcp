@@ -390,3 +390,25 @@ def test_prepare_web_html_body_plain_part_keeps_paragraph_breaks():
     plain = _plain_part(base64.urlsafe_b64decode(raw_b64).decode("utf-8"))
     assert "First.Second." not in plain
     assert "First.\nSecond." in plain.replace("\r\n", "\n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body_format", ["plain", "html"])
+async def test_send_with_attachment_honors_direction(body_format):
+    """Attachments take the web path too, so direction still applies."""
+    gmail = _gmail_service()
+    body = "<div>OK שלום</div>" if body_format == "html" else "OK שלום"
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Project sync",
+        body=body,
+        body_format=body_format,
+        direction="rtl",
+        attachments=[{"filename": "a.txt", "content": "eA=="}],
+        include_signature=False,
+    )
+
+    assert '<div dir="rtl">' in _html_part(_raw_sent(gmail))
