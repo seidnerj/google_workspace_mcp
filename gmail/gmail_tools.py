@@ -71,7 +71,6 @@ from gmail.gmail_helpers import (
     RAW_BODY_TRUNCATE_LIMIT,
     THREAD_REPLY_CONTEXT_FIELDS,
     _analyze_thread_ownership_impl,
-    _build_forward_content,
     _derive_reply_all_recipients,
     _derive_reply_headers,
     _fetch_with_retry,
@@ -92,6 +91,8 @@ from gmail.gmail_helpers import (
 from gmail.gmail_web_mime import (
     assemble_alternative,
     base_text_direction,
+    build_forwarded_container_html,
+    build_forwarded_plain,
     build_quote_container_html,
     build_quote_plain,
     encode_raw,
@@ -101,6 +102,7 @@ from gmail.gmail_web_mime import (
     gmail_boundary,
     new_message_html,
     plain_body_to_html,
+    render_forward_recipients_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -3032,6 +3034,7 @@ async def send_gmail_message(
             from_name=from_name,
             from_email=from_email,
             user_google_email=user_google_email,
+            direction=direction,
         )
 
     if subject is None or body is None:
@@ -3209,11 +3212,13 @@ async def _forward_gmail_message_impl(
     from_name: Optional[str] = None,
     from_email: Optional[str] = None,
     user_google_email: str = "",
+    direction: Literal["auto", "ltr", "rtl"] = "auto",
 ) -> str:
     """Build and send a forward of an existing Gmail message.
 
     Shared by send_gmail_message's forward path. An explicit ``subject`` overrides
-    the auto-derived 'Fwd: <original subject>'.
+    the auto-derived 'Fwd: <original subject>'. ``direction`` sets the base text
+    direction of the prepended note ('auto' detects it from the note text).
     """
     # Fetch the original message with full payload
     original_message = await asyncio.to_thread(
@@ -3225,13 +3230,27 @@ async def _forward_gmail_message_impl(
 
     payload = original_message.get("payload", {})
 
-    forward_subject, forward_body, body_format = _build_forward_content(
-        headers=_extract_headers(payload, ["Subject", "From", "Date", "To"]),
-        bodies=_extract_message_bodies(payload),
-        forward_message=forward_message,
-        forward_message_format=forward_message_format,
-        subject_override=subject,
-    )
+    # --- Parse original message metadata ---
+    orig_headers = _extract_headers(payload, ["Subject", "From", "Date", "To"])
+    orig_subject = orig_headers.get("Subject", "(no subject)")
+    orig_from_raw = orig_headers.get("From", "")
+    orig_date_str = orig_headers.get("Date", "")
+    orig_to_raw = orig_headers.get("To", "")
+    orig_bodies = _extract_message_bodies(payload)
+    orig_plain = orig_bodies.get("text", "")
+    orig_html = orig_bodies.get("html", "")
+
+    # Parse the original From into display name + email.
+    orig_from_name, orig_from_email = parseaddr(orig_from_raw)
+    orig_from_name = orig_from_name.strip() or None
+
+    # Derive the forward subject, avoiding a double prefix for "Fwd:"/"FW:".
+    if subject:
+        forward_subject = subject
+    elif orig_subject.lower().lstrip().startswith(("fwd:", "fw:")):
+        forward_subject = orig_subject
+    else:
+        forward_subject = f"Fwd: {orig_subject}"
 
     # Handle attachments
     attachments_to_send = []
@@ -3303,19 +3322,84 @@ async def _forward_gmail_message_impl(
                 + ", ".join(failed_attachments)
             )
 
-    # Prepare and send the message
-    sender_email = from_email or user_google_email
-    raw_message, _, attached_count, attachment_errors = _prepare_gmail_message(
-        subject=forward_subject,
-        body=forward_body,
-        to=to,
-        cc=cc,
-        bcc=bcc,
-        body_format=body_format,
-        from_email=sender_email,
-        from_name=from_name,
-        attachments=attachments_to_send if attachments_to_send else None,
+    # --- Build forwarded bodies via Gmail-web faithful builders ---
+
+    # When the original has no HTML body, synthesize one from plain text
+    # (mirrors how _build_web_reply_bodies derives html from plain).
+    if not orig_html and orig_plain:
+        orig_html = "<br>".join(html.escape(line) for line in orig_plain.split("\n"))
+
+    # Plain-text note from the user (if any).
+    if forward_message and forward_message_format == "html":
+        # Strip tags for the plain note portion, keeping block boundaries.
+        note_plain = html_to_text_preserving_breaks(forward_message).strip()
+        note_html = html_newlines_to_br(forward_message)
+    else:
+        note_plain = forward_message or ""
+        note_html = plain_body_to_html(forward_message) if forward_message else ""
+
+    # Plain body: optional note + forwarded block (NOT > -quoted).
+    fwd_plain_block = build_forwarded_plain(
+        from_name=orig_from_name,
+        from_email=orig_from_email or orig_from_raw,
+        date_str=orig_date_str,
+        subject=orig_subject,
+        to_rendered_plain=orig_to_raw,
+        orig_plain=orig_plain,
     )
+    if note_plain:
+        forward_plain = f"{note_plain}\n\n{fwd_plain_block}"
+    else:
+        forward_plain = fwd_plain_block
+
+    # HTML body: note div + forwarded container (no blockquote).
+    fwd_html_container = build_forwarded_container_html(
+        from_name=orig_from_name,
+        from_email=orig_from_email or orig_from_raw,
+        date_str=orig_date_str,
+        subject=orig_subject,
+        to_rendered=render_forward_recipients_html(orig_to_raw),
+        orig_html=orig_html,
+    )
+    if note_html:
+        # Base direction follows the user's note; the forwarded original keeps
+        # its own dir markup inside the container.
+        note_dir = base_text_direction(note_plain) if direction == "auto" else direction
+        forward_html = new_message_html(
+            f"{note_html}<br><br>{fwd_html_container}", note_dir
+        )
+    else:
+        # No note: nothing user-authored to orient, stay ltr (byte-identical).
+        forward_html = new_message_html(f"<br>{fwd_html_container}")
+
+    # --- Prepare and send the message ---
+    sender_email = from_email or user_google_email
+    if attachments_to_send:
+        # The web assembler does not carry attachments yet; send the same HTML
+        # body through the EmailMessage path so the files are preserved.
+        raw_message, _, attached_count, attachment_errors = _prepare_gmail_message(
+            subject=forward_subject,
+            body=forward_html,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            body_format="html",
+            from_email=sender_email,
+            from_name=from_name,
+            attachments=attachments_to_send,
+        )
+    else:
+        raw_message = _prepare_gmail_message_web(
+            subject=forward_subject,
+            plain_body=forward_plain,
+            html_body=forward_html,
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            from_email=sender_email,
+            from_name=from_name,
+        )
+        attached_count, attachment_errors = 0, []
     if attachments_to_send and attached_count != len(attachments_to_send):
         details = (
             f" Details: {'; '.join(attachment_errors)}" if attachment_errors else ""

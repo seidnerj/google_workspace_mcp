@@ -50,3 +50,4 @@ drifts.
 
 ## Files
 - `golden_reply.json` - reply, no attachments.
+- `golden_forward.json` - forward, no attachments.

@@ -502,6 +502,28 @@ class TestLongNonAsciiNameNoFolding:
         assert "From:" in msg
 
 
+class TestForwardedDateEscaping:
+    """date_str in the forwarded-message attr block must be HTML-escaped."""
+
+    def test_date_str_with_html_chars_is_escaped(self):
+        from gmail.gmail_web_mime import build_forwarded_container_html
+
+        malicious_date = '<script>alert("xss")</script>'
+        result = build_forwarded_container_html(
+            from_name=None,
+            from_email="sender@example.com",
+            date_str=malicious_date,
+            subject="Normal Subject",
+            to_rendered="recipient@example.com",
+            orig_html="<div>body</div>",
+        )
+        # Raw tag injection must not appear
+        assert "<script>" not in result
+        # Escaped form must be present (proves escaping occurred)
+        assert "&lt;script&gt;" in result
+        assert "&gt;" in result
+
+
 class TestChooseCteUnderscore:
     """choose_cte must classify underscore-heavy ASCII as quoted-printable."""
 
@@ -512,6 +534,68 @@ class TestChooseCteUnderscore:
         assert result == "quoted-printable", (
             f"Expected 'quoted-printable' for underscore-heavy ASCII, got {result!r}"
         )
+
+
+class TestRenderForwardRecipientsHtml:
+    """render_forward_recipients_html must produce Gmail-web forwarded-To markup."""
+
+    def test_bare_address_no_display_name(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html("addr@example.com")
+        assert result == '<a href="mailto:addr@example.com">addr@example.com</a>'
+
+    def test_address_with_display_name(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html('"Jane Roe" <jane@example.com>')
+        assert (
+            result
+            == 'Jane Roe &lt;<a href="mailto:jane@example.com">jane@example.com</a>&gt;'
+        )
+
+    def test_multiple_recipients_joined_by_comma_space(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        result = render_forward_recipients_html("a@example.com, b@example.com")
+        assert result == (
+            '<a href="mailto:a@example.com">a@example.com</a>, '
+            '<a href="mailto:b@example.com">b@example.com</a>'
+        )
+
+    def test_injection_regression_display_name_escaped(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        malicious = '"<img src=x onerror=alert(1)>" <a@b.com>'
+        result = render_forward_recipients_html(malicious)
+        # Raw unescaped injection tag must not appear
+        assert "<img" not in result
+        # Escaped form must be present (confirms escaping occurred)
+        assert "&lt;img" in result
+
+    def test_empty_string_returns_empty(self):
+        from gmail.gmail_web_mime import render_forward_recipients_html
+
+        assert render_forward_recipients_html("") == ""
+
+    def test_build_forwarded_container_uses_mailto_link(self):
+        from gmail.gmail_web_mime import (
+            build_forwarded_container_html,
+            render_forward_recipients_html,
+        )
+
+        to_html = render_forward_recipients_html('"X" <x@example.com>')
+        result = build_forwarded_container_html(
+            from_name="Sender",
+            from_email="sender@example.com",
+            date_str="Mon, 1 Jan 2024",
+            subject="Test",
+            to_rendered=to_html,
+            orig_html="<div>body</div>",
+        )
+        assert '<a href="mailto:x@example.com">' in result
+        # The raw unescaped angle-bracket tag <x@example.com> must NOT appear
+        assert "<x@example.com>" not in result
 
 
 class TestNonAsciiSubjectEncoding:
