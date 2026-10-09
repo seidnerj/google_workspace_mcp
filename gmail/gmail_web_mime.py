@@ -19,7 +19,7 @@ import secrets
 import unicodedata
 from datetime import datetime
 from email.header import Header
-from email.errors import InvalidHeaderDefect
+from email.errors import HeaderParseError, InvalidHeaderDefect
 from email.headerregistry import HeaderRegistry
 from email.utils import encode_rfc2231, formataddr
 from typing import Iterable, List, Optional, Tuple
@@ -81,21 +81,23 @@ def format_display_address(name: Optional[str], email: str) -> str:
         return formataddr((safe_name, safe_email))
     except UnicodeEncodeError:
         # Non-ASCII name: RFC2047 encoded-word for the display phrase.
-        encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998)
+        encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998, linesep="\r\n")
         return f"{encoded_name} <{safe_email}>"
 
 
 def format_address_list(value: str) -> str:
     """RFC 2047 encode non-ASCII display names in a To/Cc/Bcc address list.
 
-    An all-ASCII value is returned unchanged (byte-identical to the input);
-    otherwise each address is reformatted with ``format_display_address``.
+    The list is always validated (a malformed entry raises ``ValueError``). A
+    valid all-ASCII value is then returned unchanged (byte-identical to the
+    input); otherwise each address is reformatted with ``format_display_address``.
     """
+    groups = parse_address_list(value)
     if value.isascii():
         return value
     return join_address_groups(
         (group_name, [format_display_address(n, a) for n, a in members])
-        for group_name, members in parse_address_list(value)
+        for group_name, members in groups
     )
 
 
@@ -127,7 +129,12 @@ def parse_address_list(value: str) -> List[AddressGroup]:
     entry (a name with no address, an unclosed ``<``) raises ``ValueError``
     instead of being silently dropped, so a recipient is never lost.
     """
-    header = _ADDRESS_HEADER("To", value)
+    try:
+        header = _ADDRESS_HEADER("To", value)
+    except (IndexError, HeaderParseError) as exc:
+        # The stdlib parser raises instead of recording a defect on some
+        # truncated input (e.g. "José <" on Python 3.11).
+        raise ValueError(f"Invalid address list: could not parse {value!r}.") from exc
     if any(isinstance(d, InvalidHeaderDefect) for d in header.defects):
         raise ValueError(f"Invalid address list: could not parse {value!r}.")
     groups: List[AddressGroup] = []
@@ -145,7 +152,7 @@ def _format_group_name(name: str) -> str:
     """Render an RFC 5322 group display name (quoted or RFC 2047 encoded)."""
     safe = _strip_header_controls(name)
     if not safe.isascii():
-        return Header(safe, "utf-8").encode(maxlinelen=998)
+        return Header(safe, "utf-8").encode(maxlinelen=998, linesep="\r\n")
     if any(c in _PHRASE_SPECIALS for c in safe):
         return '"' + safe.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return safe
