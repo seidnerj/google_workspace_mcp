@@ -3124,6 +3124,14 @@ async def send_gmail_message(
             raise UserInputError(
                 "'to' is required when forwarding via 'forward_message_id'."
             )
+        # Same Send-As displayName fallback as a regular send: only looked up
+        # when signatures are enabled, so the settings endpoint stays optional.
+        if include_signature and from_name is None:
+            _, _, from_name = await _get_send_as_identity_and_signature(
+                service,
+                from_email=from_email or user_google_email,
+                fallback_email=user_google_email,
+            )
         logger.info(
             f"[send_gmail_message] Forwarding message '{forward_message_id}' for '{user_google_email}'"
         )
@@ -3448,8 +3456,11 @@ async def _forward_gmail_message_impl(
             f"{note_html}<br><br>{fwd_html_container}", note_dir
         )
     else:
-        # No note: nothing user-authored to orient, stay ltr (byte-identical).
-        forward_html = new_message_html(f"<br>{fwd_html_container}")
+        # No note: nothing user-authored to orient, so "auto" stays ltr
+        # (byte-identical); an explicit direction is still honored.
+        forward_html = new_message_html(
+            f"<br>{fwd_html_container}", "ltr" if direction == "auto" else direction
+        )
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
@@ -3731,11 +3742,16 @@ async def draft_gmail_message(
         )
     """
     if forward_message_id:
-        sender_email = from_email
-        if not sender_email:
-            sender_email, _, _ = await _get_send_as_identity_and_signature(
-                service, from_email=None, fallback_email=user_google_email
+        # Resolve the identity and Gmail-web From displayName the same way as a
+        # regular draft below.
+        if from_email and not include_signature:
+            sender_email = from_email
+        else:
+            sender_email, _, send_as_name = await _get_send_as_identity_and_signature(
+                service, from_email=from_email, fallback_email=user_google_email
             )
+            if from_name is None:
+                from_name = send_as_name
         logger.info(
             f"[draft_gmail_message] Drafting forward of message '{forward_message_id}' for '{user_google_email}'"
         )

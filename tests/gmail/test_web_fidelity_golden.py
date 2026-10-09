@@ -27,7 +27,7 @@ def _tags(html: str) -> str:
 
 def test_forward_container_matches_golden_skeleton():
     """Verify builder output yields probes matching golden fixture values."""
-    golden = json.loads((FIX / "golden_forward.json").read_text())
+    golden = json.loads((FIX / "golden_forward.json").read_text(encoding="utf-8"))
     html = build_forwarded_container_html(
         "Jane Roe",
         "jane@example.com",
@@ -101,7 +101,7 @@ def test_forward_container_html_forwarded_literal():
 
 def test_forward_container_html_probes_match_golden():
     """All boolean probes must agree with golden_forward.json fixture values."""
-    golden = json.loads((FIX / "golden_forward.json").read_text())
+    golden = json.loads((FIX / "golden_forward.json").read_text(encoding="utf-8"))
     html = build_forwarded_container_html(
         "Alice",
         "alice@example.com",
@@ -306,7 +306,7 @@ def test_forward_plain_whitespace_only_from_name():
 
 def test_forward_plain_scaffold_matches_golden():
     """Plain scaffold structure must agree with golden_forward.json."""
-    golden = json.loads((FIX / "golden_forward.json").read_text())
+    golden = json.loads((FIX / "golden_forward.json").read_text(encoding="utf-8"))
     text = build_forwarded_plain(
         "Jane Roe",
         "jane@example.com",
