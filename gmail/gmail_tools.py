@@ -2876,12 +2876,12 @@ async def send_gmail_message(
         raise UserInputError(
             f"Could not derive a recipient from thread '{thread_id}'. Pass 'to' explicitly."
         )
-    if not (subject or "").strip() and target_reply:
-        subject = target_reply.get("subject") or subject
-    if subject is None:
-        raise UserInputError(
-            f"Could not inherit a subject from thread '{thread_id}'. Pass 'subject' explicitly."
-        )
+    if thread_id and not (subject or "").strip():
+        subject = (target_reply or {}).get("subject") or ""
+        if not subject.strip():
+            raise UserInputError(
+                f"Could not inherit a subject from thread '{thread_id}'. Pass 'subject' explicitly."
+            )
 
     # Optionally append the Gmail signature from send-as settings, mirroring
     # draft_gmail_message so sent mail respects the user's Settings > Signature.

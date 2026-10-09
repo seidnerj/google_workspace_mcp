@@ -228,3 +228,38 @@ async def test_draft_reply_inherits_subject_even_with_explicit_reply_headers():
     )
 
     assert _drafted_subject(service) == "[list] Re: Project status"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject", ["", "   "])
+async def test_send_reply_blank_subject_without_inheritable_subject_raises(subject):
+    service = _service_with_parent("")
+
+    with pytest.raises(UserInputError, match="subject"):
+        await _unwrap(send_gmail_message)(
+            service=service,
+            user_google_email="you@example.org",
+            to="ada@example.com",
+            subject=subject,
+            body="Thanks!",
+            thread_id="thread123",
+            include_signature=False,
+        )
+    service.users().messages().send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_reply_whitespace_subject_inherits_parent_subject():
+    service = _service_with_parent("Project sync")
+
+    await _unwrap(send_gmail_message)(
+        service=service,
+        user_google_email="you@example.org",
+        to="ada@example.com",
+        subject="   ",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    assert _sent_subject(service) == "Re: Project sync"
