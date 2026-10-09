@@ -22,6 +22,7 @@ def _make_creds(scopes=()):
     creds.scopes = set(scopes)
     creds.token = "tok-abc"
     creds.expired = False
+    creds.valid = True
     return creds
 
 
@@ -562,6 +563,7 @@ class TestDispatchTransmitSmtpPath:
         # MagicMock tracks calls automatically.
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE])
         creds.expired = True
+        creds.valid = False
 
         # Patch google.auth.transport.requests.Request to avoid real HTTP.
         import google.auth.transport.requests as _gtr
@@ -590,6 +592,43 @@ class TestDispatchTransmitSmtpPath:
 
         # creds.refresh is a MagicMock attribute - assert it was called once.
         creds.refresh.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("valid", [False, True])
+    async def test_smtp_refreshes_invalid_creds_without_expiry(
+        self, monkeypatch, valid
+    ):
+        """Creds with no token or expiry are invalid but not 'expired': refresh them."""
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE])
+        creds.token = None if not valid else "tok-abc"
+        creds.expiry = None
+        creds.expired = False
+        creds.valid = valid
+
+        import google.auth.transport.requests as _gtr
+
+        monkeypatch.setattr(_gtr, "Request", MagicMock)
+
+        await t.dispatch_transmit(
+            _make_service(),
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=_RAW_MSG,
+            thread_id_final=None,
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=None,
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        assert creds.refresh.called is (not valid)
 
 
 class TestDispatchTransmitSmtpRefused:

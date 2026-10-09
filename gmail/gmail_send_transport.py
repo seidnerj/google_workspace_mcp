@@ -234,8 +234,9 @@ async def _dispatch_smtp(
 ) -> str:
     from google.auth.transport.requests import Request  # local import to avoid cycles
 
-    # Ensure credentials are fresh.
-    if creds.expired:
+    # Ensure credentials are usable: 'valid' also covers a missing token or
+    # expiry, which 'expired' alone reports as not expired.
+    if not creds.valid:
         await asyncio.to_thread(creds.refresh, Request())
 
     raw_bytes = base64.urlsafe_b64decode(raw_message_b64)
