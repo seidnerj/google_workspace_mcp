@@ -90,6 +90,7 @@ from gmail.gmail_helpers import (
 )
 from gmail.gmail_web_mime import (
     assemble_alternative,
+    base_text_direction,
     encode_raw,
     format_display_address,
     gmail_boundary,
@@ -1320,22 +1321,32 @@ def _build_web_compose_raw(
     from_name: Optional[str],
     in_reply_to: Optional[str],
     references: Optional[str],
+    direction: Literal["auto", "ltr", "rtl"],
 ) -> str:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
 
     Builds both body parts from ``body`` (Gmail's typed ``<div>`` structure for
     plain text, the ltr container for HTML) and delegates the deterministic MIME
     assembly to ``_prepare_gmail_message``'s web path. The reply ``Re:`` subject
-    prefix is applied there, exactly as on the legacy path.
+    prefix is applied there, exactly as on the legacy path. ``direction`` is the
+    base text direction; ``"auto"`` detects it from the body text.
     """
     if body_format == "html":
+        resolved_dir = (
+            base_text_direction(_html_to_text(body))
+            if direction == "auto"
+            else direction
+        )
         new_html = (
-            body if body.lstrip().startswith("<div dir=") else new_message_html(body)
+            body
+            if body.lstrip().startswith("<div dir=")
+            else new_message_html(body, resolved_dir)
         )
         new_plain = html_to_text_preserving_breaks(body).strip()
     else:
         new_plain = body
-        new_html = new_message_html(plain_body_to_html(body))
+        resolved_dir = base_text_direction(body) if direction == "auto" else direction
+        new_html = new_message_html(plain_body_to_html(body), resolved_dir)
 
     raw_message, _thread, _count, _errors = _prepare_gmail_message(
         subject=subject,
@@ -1439,6 +1450,7 @@ def _prepare_gmail_message(
     attachments: Optional[List[Dict[str, str]]] = None,
     web_compose: bool = False,
     html_body: Optional[str] = None,
+    direction: Literal["auto", "ltr", "rtl"] = "auto",
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
@@ -1449,7 +1461,9 @@ def _prepare_gmail_message(
     text/html content; when ``html_body`` is omitted it is derived from
     ``body``. ``to``/``cc``/``bcc`` are expected pre-formatted
     (``Display Name <addr>``); ``from`` is formatted here from ``from_email`` +
-    optional ``from_name``. The web path does not carry attachments.
+    optional ``from_name``. ``direction`` sets the base text direction of a
+    derived HTML part (``"auto"`` detects it from ``body``). The web path does
+    not carry attachments.
 
     Args:
         subject: Email subject
@@ -1488,15 +1502,23 @@ def _prepare_gmail_message(
             plain_part = body
             html_part = html_body
         elif normalized_format == "html":
+            resolved_dir = (
+                base_text_direction(_html_to_text(body))
+                if direction == "auto"
+                else direction
+            )
             html_part = (
                 body
                 if body.lstrip().startswith("<div dir=")
-                else new_message_html(body)
+                else new_message_html(body, resolved_dir)
             )
             plain_part = html_to_text_preserving_breaks(body).strip()
         else:
             plain_part = body
-            html_part = new_message_html(plain_body_to_html(body))
+            resolved_dir = (
+                base_text_direction(body) if direction == "auto" else direction
+            )
+            html_part = new_message_html(plain_body_to_html(body), resolved_dir)
 
         raw_message = _prepare_gmail_message_web(
             subject=reply_subject,
@@ -2789,6 +2811,12 @@ async def send_gmail_message(
             description="Whether to append the Gmail signature from Settings > Signature when available. Defaults to true.",
         ),
     ] = True,
+    direction: Annotated[
+        Literal["auto", "ltr", "rtl"],
+        Field(
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script \u2192 right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
+        ),
+    ] = "auto",
     quote_original: Annotated[
         bool,
         Field(
@@ -3104,6 +3132,7 @@ async def send_gmail_message(
             from_name=from_name,
             in_reply_to=in_reply_to,
             references=references,
+            direction=direction,
         )
         thread_id_final, attached_count, attachment_errors = thread_id, 0, []
 
@@ -3367,6 +3396,12 @@ async def draft_gmail_message(
             description="Whether to include the original message as a quoted reply. Only has an effect when thread_id is provided. Defaults to false.",
         ),
     ] = False,
+    direction: Annotated[
+        Literal["auto", "ltr", "rtl"],
+        Field(
+            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script \u2192 right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
+        ),
+    ] = "auto",
 ) -> str:
     """
     Creates a draft email in the user's Gmail account. Supports both new drafts and reply drafts with optional attachments.
@@ -3569,6 +3604,7 @@ async def draft_gmail_message(
             from_name=from_name,
             in_reply_to=in_reply_to,
             references=references,
+            direction=direction,
         )
         attached_count, attachment_errors = 0, []
 

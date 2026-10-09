@@ -8,6 +8,7 @@ import base64
 import quopri
 import re
 from gmail.gmail_web_mime import (
+    base_text_direction,
     format_display_address,
     gmail_boundary,
     new_message_html,
@@ -63,6 +64,34 @@ class TestDisplayAddress:
         assert "\r" not in out and "\n" not in out
 
 
+class TestBaseTextDirection:
+    def test_english_is_ltr(self):
+        assert base_text_direction("Hello world") == "ltr"
+
+    def test_hebrew_is_rtl(self):
+        assert base_text_direction("שלום עולם") == "rtl"
+
+    def test_arabic_is_rtl(self):
+        assert base_text_direction("مرحبا بالعالم") == "rtl"
+
+    def test_leading_neutrals_skipped_to_first_strong_rtl(self):
+        # Quotes, digits and whitespace are bidi-neutral; the first strong char
+        # (Hebrew) decides the base direction.
+        assert base_text_direction('  "123" שלום') == "rtl"
+
+    def test_leading_ltr_word_in_otherwise_rtl_body_detected_ltr(self):
+        # Documents the first-strong-char heuristic's limitation: an English
+        # word before any Hebrew makes the base direction LTR (this is why the
+        # explicit `direction` override exists).
+        assert base_text_direction("OK שלום עולם") == "ltr"
+
+    def test_no_strong_char_defaults_ltr(self):
+        assert base_text_direction("123 $ ₪ !!! ---") == "ltr"
+
+    def test_empty_defaults_ltr(self):
+        assert base_text_direction("") == "ltr"
+
+
 class TestNewMessageHtml:
     def test_wraps_in_ltr_div(self):
         assert new_message_html("<div>Hi</div>") == '<div dir="ltr"><div>Hi</div></div>'
@@ -71,6 +100,18 @@ class TestNewMessageHtml:
         # No direction argument must stay byte-identical to the historical output
         # (existing web-compose fidelity tests assert exact dir="ltr").
         assert new_message_html("<div>Hi</div>") == '<div dir="ltr"><div>Hi</div></div>'
+
+    def test_explicit_rtl_direction(self):
+        assert (
+            new_message_html("<div>שלום</div>", direction="rtl")
+            == '<div dir="rtl"><div>שלום</div></div>'
+        )
+
+    def test_explicit_ltr_direction_matches_default(self):
+        assert (
+            new_message_html("<div>Hi</div>", direction="ltr")
+            == '<div dir="ltr"><div>Hi</div></div>'
+        )
 
     def test_plain_body_to_html_escapes_and_wraps_lines(self):
         html = plain_body_to_html("Line one\n\nLine three & <stuff>")
@@ -212,6 +253,26 @@ class TestPrepareWebMessage:
         ]
         assert subject_lines, raw
         assert "=?utf-8?" in raw.lower()
+
+    def test_auto_direction_hebrew_body_is_rtl(self):
+        msg = self._build_autobody("שלום עולם")
+        assert '<div dir="rtl">' in msg
+        assert '<div dir="ltr">' not in msg
+
+    def test_auto_direction_english_body_stays_ltr(self):
+        msg = self._build_autobody("Hello there")
+        assert '<div dir="ltr">' in msg
+        assert '<div dir="rtl">' not in msg
+
+    def test_explicit_rtl_override_forces_rtl_on_ltr_first_char(self):
+        # Body opens with an English word (auto would pick ltr); explicit rtl wins.
+        msg = self._build_autobody("OK שלום עולם", direction="rtl")
+        assert '<div dir="rtl">' in msg
+
+    def test_explicit_ltr_override_forces_ltr_on_rtl_body(self):
+        msg = self._build_autobody("שלום עולם", direction="ltr")
+        assert '<div dir="ltr">' in msg
+        assert '<div dir="rtl">' not in msg
 
 
 class TestNoToolFingerprints:
