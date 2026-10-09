@@ -116,7 +116,9 @@ async def test_forward_no_attachment_mime_shape():
 @pytest.mark.asyncio
 async def test_forward_with_attachment_mime_shape():
     """With-attachment forward → multipart/mixed → [alternative] + attachment part."""
-    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    golden = json.loads(
+        (FIX / "golden_forward_attach.json").read_text(encoding="utf-8")
+    )
     att_raw = b"%PDF-1.4 fake content"
     att_b64 = base64.urlsafe_b64encode(att_raw).decode()
 
@@ -242,7 +244,9 @@ async def test_forward_html_probes_no_attachment():
 @pytest.mark.asyncio
 async def test_forward_html_probes_with_attachment():
     """HTML probes must match golden_forward_attach fixture when attachments present."""
-    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    golden = json.loads(
+        (FIX / "golden_forward_attach.json").read_text(encoding="utf-8")
+    )
     att_raw = b"binary content"
     att_b64 = base64.urlsafe_b64encode(att_raw).decode()
 
