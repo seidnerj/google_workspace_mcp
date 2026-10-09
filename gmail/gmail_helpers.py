@@ -1023,8 +1023,12 @@ async def _get_send_as_identity_and_signature(
     service,
     from_email: Optional[str],
     fallback_email: str,
-) -> tuple[str, str]:
-    """Resolve the requested or default Gmail send-as identity and signature."""
+) -> tuple[str, str, Optional[str]]:
+    """Resolve the requested or default Gmail send-as identity.
+
+    Returns ``(sender_email, signature_html, display_name)``. ``display_name`` is
+    the name Gmail web renders in the From line, or None when unset.
+    """
     send_as_entries = await _get_send_as_entries(service)
     selected_entry = None
 
@@ -1043,12 +1047,14 @@ async def _get_send_as_identity_and_signature(
 
     sender_email = from_email or fallback_email
     signature_html = ""
+    display_name = None
     if selected_entry:
         if not from_email:
             sender_email = selected_entry.get("sendAsEmail") or fallback_email
         signature_html = selected_entry.get("signature", "") or ""
+        display_name = (selected_entry.get("displayName") or "").strip() or None
 
-    return sender_email, signature_html
+    return sender_email, signature_html, display_name
 
 
 async def _get_send_as_signature_html_for_tool(
