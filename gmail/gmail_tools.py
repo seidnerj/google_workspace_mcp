@@ -3427,8 +3427,11 @@ async def _forward_gmail_message_impl(
             f"{note_html}<br><br>{fwd_html_container}", note_dir
         )
     else:
-        # No note: nothing user-authored to orient, stay ltr (byte-identical).
-        forward_html = new_message_html(f"<br>{fwd_html_container}")
+        # No note: nothing user-authored to orient, so "auto" stays ltr
+        # (byte-identical); an explicit direction is still honored.
+        forward_html = new_message_html(
+            f"<br>{fwd_html_container}", "ltr" if direction == "auto" else direction
+        )
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email

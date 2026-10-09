@@ -2347,6 +2347,7 @@ async def test_draft_gmail_message_forward_honors_direction(monkeypatch):
         body="FYI",
         from_email="user@example.com",
         direction="rtl",
+        include_signature=False,
     )
 
     assert captured["direction"] == "rtl"
