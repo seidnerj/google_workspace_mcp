@@ -53,6 +53,9 @@ HEX_ESCAPED_BODY = "&#x3C;p&#x3e;Hello&#x3c;/p&#X3E;"
         "&LT;p&GT;Hi&LT;/p&GT;",
         # Only '<' escaped: a literal '>' still terminates the opening tag.
         "&lt;p>Hello&lt;/p>",
+        # Attributes between the tag name and the escaped '>'.
+        '&lt;a href="https://example.com/?a=1&amp;b=2"&gt;link&lt;/a&gt;',
+        "&lt;br/&gt;Line",
     ],
 )
 def test_rejects_fully_escaped_html_body(body):
@@ -74,6 +77,10 @@ def test_rejects_fully_escaped_html_body(body):
         ("<p>Use &#60;br&#62; for a line break.</p>", "html"),
         # Opens with an unrelated numeric reference, not an escaped '<'.
         ("&#169; 2025 Example", "html"),
+        # An escaped '<' followed by a word but no '>' or '&gt;' closing it is
+        # prose, not an escaped tag: whitespace alone does not end a tag.
+        ("&lt;hello world", "html"),
+        ("&lt;b and c are both small", "html"),
         # Same escaped body, but the caller asked for plain: the entities are
         # then plausibly intentional and plain bodies are escaped downstream.
         (ESCAPED_BODY, "plain"),
