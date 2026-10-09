@@ -688,7 +688,7 @@ async def _fetch_original_for_quote(
 _ESCAPED_LT = r"&(?:lt|#0*60|#x0*3c);"
 _ESCAPED_GT = r"&(?:gt|#0*62|#x0*3e);"
 _ESCAPED_HTML_OPENING_TAG = re.compile(
-    rf"^\s*{_ESCAPED_LT}\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|{_ESCAPED_GT})",
+    rf"^\s*{_ESCAPED_LT}\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|>|{_ESCAPED_GT})",
     re.IGNORECASE,
 )
 _RAW_HTML_TAG = re.compile(r"<\s*/?\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|>)")

@@ -46,7 +46,14 @@ HEX_ESCAPED_BODY = "&#x3C;p&#x3e;Hello&#x3c;/p&#X3E;"
 
 @pytest.mark.parametrize(
     "body",
-    [ESCAPED_BODY, NUMERIC_ESCAPED_BODY, HEX_ESCAPED_BODY, "&LT;p&GT;Hi&LT;/p&GT;"],
+    [
+        ESCAPED_BODY,
+        NUMERIC_ESCAPED_BODY,
+        HEX_ESCAPED_BODY,
+        "&LT;p&GT;Hi&LT;/p&GT;",
+        # Only '<' escaped: a literal '>' still terminates the opening tag.
+        "&lt;p>Hello&lt;/p>",
+    ],
 )
 def test_rejects_fully_escaped_html_body(body):
     with pytest.raises(UserInputError) as excinfo:
