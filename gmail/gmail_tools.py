@@ -1293,9 +1293,17 @@ async def _resolve_url_attachments(
     return resolved
 
 
-# A body that already opens with a ``<div dir=...>`` container; group ``dir``
-# spans the attribute value (quoted or bare).
-_LEADING_DIR_DIV_RE = re.compile(r"\s*<div dir=(?P<dir>\"[^\"]*\"|'[^']*'|[^\s>]+)")
+# A body that already opens with a ``<div ... dir=...>`` container; group
+# ``dir`` spans the attribute value (quoted or bare). Attributes before ``dir``
+# are consumed whole (name plus quoted or bare value), so ``dir=`` text inside
+# another attribute's quoted value is never mistaken for the attribute itself.
+_HTML_ATTR_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+)"
+_LEADING_DIR_DIV_RE = re.compile(
+    r"\s*<div"
+    rf"(?:\s+(?!dir\s*=)[^\s\"'>/=]+(?:\s*=\s*{_HTML_ATTR_VALUE})?)*"
+    rf"\s+dir\s*=\s*(?P<dir>{_HTML_ATTR_VALUE})",
+    re.IGNORECASE,
+)
 
 
 def _derive_web_bodies(

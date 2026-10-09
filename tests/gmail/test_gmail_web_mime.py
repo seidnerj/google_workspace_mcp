@@ -681,6 +681,26 @@ class TestForcedDirectionOnExistingWrapper:
         body = '<div dir="rtl">Hello</div>'
         assert self._html(body, "auto") == body
 
+    def test_uppercase_wrapper_is_recognized(self):
+        body = '<DIV DIR="rtl">Hello</DIV>'
+        assert self._html(body, "auto") == body
+        assert self._html(body, "ltr") == '<DIV DIR="ltr">Hello</DIV>'
+
+    def test_dir_after_other_attributes_is_recognized(self):
+        body = '<div class="x" dir="rtl">Hello</div>'
+        assert self._html(body, "auto") == body
+        assert self._html(body, "ltr") == '<div class="x" dir="ltr">Hello</div>'
+
+    def test_dir_text_inside_a_quoted_attribute_is_not_matched(self):
+        body = '<div title="a dir=rtl b" dir="ltr">Hi</div>'
+        assert self._html(body, "rtl") == '<div title="a dir=rtl b" dir="rtl">Hi</div>'
+
+    def test_data_dir_attribute_is_not_the_dir_attribute(self):
+        body = '<div data-dir="rtl">Hi</div>'
+        out = self._html(body, "ltr")
+        assert out.startswith('<div dir="ltr"')
+        assert '<div data-dir="rtl">Hi</div>' in out
+
 
 class TestReplyQuoteParentFidelity:
     """The reply trail keeps the parent's own clock time and paragraph breaks."""
