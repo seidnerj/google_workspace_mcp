@@ -90,7 +90,7 @@ def _create_mock_service(message, attachments_data=None, sent_message_id="sent_f
 @pytest.mark.asyncio
 async def test_forward_no_attachment_mime_shape():
     """No-attachment forward → top-level multipart/alternative (golden_forward)."""
-    golden = json.loads((FIX / "golden_forward.json").read_text())
+    golden = json.loads((FIX / "golden_forward.json").read_text(encoding="utf-8"))
     msg = _create_mock_message(
         text_body="Lorem ipsum dolor sit amet.",
         html_body="<div>Lorem ipsum dolor sit amet.</div>",
@@ -116,7 +116,9 @@ async def test_forward_no_attachment_mime_shape():
 @pytest.mark.asyncio
 async def test_forward_with_attachment_mime_shape():
     """With-attachment forward → multipart/mixed → [alternative] + attachment part."""
-    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    golden = json.loads(
+        (FIX / "golden_forward_attach.json").read_text(encoding="utf-8")
+    )
     att_raw = b"%PDF-1.4 fake content"
     att_b64 = base64.urlsafe_b64encode(att_raw).decode()
 
@@ -200,7 +202,7 @@ async def test_forward_refuses_to_send_when_builder_drops_an_attachment(monkeypa
 @pytest.mark.asyncio
 async def test_forward_html_probes_no_attachment():
     """HTML part must pass all golden forward html probes (no attachment)."""
-    golden = json.loads((FIX / "golden_forward.json").read_text())
+    golden = json.loads((FIX / "golden_forward.json").read_text(encoding="utf-8"))
     msg = _create_mock_message(
         text_body="Some original content.",
         html_body="<div>Some original content.</div>",
@@ -242,7 +244,9 @@ async def test_forward_html_probes_no_attachment():
 @pytest.mark.asyncio
 async def test_forward_html_probes_with_attachment():
     """HTML probes must match golden_forward_attach fixture when attachments present."""
-    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    golden = json.loads(
+        (FIX / "golden_forward_attach.json").read_text(encoding="utf-8")
+    )
     att_raw = b"binary content"
     att_b64 = base64.urlsafe_b64encode(att_raw).decode()
 

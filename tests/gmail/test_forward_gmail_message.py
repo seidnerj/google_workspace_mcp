@@ -305,6 +305,31 @@ async def test_forward_no_note_stays_ltr():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["rtl", "ltr"])
+async def test_forward_no_note_honors_explicit_direction(direction):
+    """No note: an explicit direction still sets the wrapper's base direction."""
+    message = create_mock_message(
+        subject="FYI",
+        from_addr="alice@example.com",
+        to_addr="bob@example.com",
+        text_body="Original message body.",
+    )
+    mock_service = create_mock_service(message, sent_message_id="fwddir")
+
+    await _forward_gmail_message_impl(
+        service=mock_service,
+        message_id="msg789",
+        to="recipient@example.com",
+        user_google_email="me@example.com",
+        direction=direction,
+    )
+
+    sent = get_sent_mime_message(mock_service)
+    body = get_body_text(sent, subtype="html")
+    assert body.startswith(f'<div dir="{direction}">')
+
+
+@pytest.mark.asyncio
 async def test_forward_with_message_html():
     """Forward with HTML user message prepended"""
     message = create_mock_message(
