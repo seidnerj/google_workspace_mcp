@@ -13,7 +13,9 @@ import html as _html
 import quopri
 import secrets
 from email.header import Header
-from email.utils import formataddr, getaddresses
+from email.errors import InvalidHeaderDefect
+from email.headerregistry import HeaderRegistry
+from email.utils import formataddr
 from typing import List, Optional, Tuple
 
 
@@ -61,9 +63,54 @@ def format_address_list(value: str) -> str:
     """
     if value.isascii():
         return value
-    return ", ".join(
-        format_display_address(name, addr) for name, addr in getaddresses([value])
-    )
+    out: List[str] = []
+    for group_name, members in parse_address_list(value):
+        formatted = ", ".join(format_display_address(n, a) for n, a in members)
+        if group_name is None:
+            out.append(formatted)
+        else:
+            sep = ": " if formatted else ":"
+            out.append(f"{_format_group_name(group_name)}{sep}{formatted};")
+    return ", ".join(out)
+
+
+AddressGroup = Tuple[Optional[str], List[Tuple[str, str]]]
+
+
+def parse_address_list(value: str) -> List[AddressGroup]:
+    """Parse an RFC 5322 address list into ``(group_name, [(name, addr), ...])``.
+
+    Ungrouped mailboxes come back as ``(None, [(name, addr)])``. Empty list
+    elements (``a@x.com,,`` or a trailing comma) are skipped; any malformed
+    entry (a name with no address, an unclosed ``<``) raises ``ValueError``
+    instead of being silently dropped, so a recipient is never lost.
+    """
+    header = _ADDRESS_HEADER("To", value)
+    if any(isinstance(d, InvalidHeaderDefect) for d in header.defects):
+        raise ValueError(f"Invalid address list: could not parse {value!r}.")
+    groups: List[AddressGroup] = []
+    for group in header.groups:
+        members = [(a.display_name, a.addr_spec) for a in group.addresses]
+        if any(not addr for _name, addr in members):
+            raise ValueError(f"Invalid address list: empty address in {value!r}.")
+        groups.append((group.display_name, members))
+    if not groups:
+        raise ValueError(f"Invalid address list: no address in {value!r}.")
+    return groups
+
+
+def _format_group_name(name: str) -> str:
+    """Render an RFC 5322 group display name (quoted or RFC 2047 encoded)."""
+    safe = _strip_header_controls(name)
+    if not safe.isascii():
+        return Header(safe, "utf-8").encode(maxlinelen=998)
+    if any(c in _PHRASE_SPECIALS for c in safe):
+        return '"' + safe.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return safe
+
+
+_ADDRESS_HEADER = HeaderRegistry()
+_PHRASE_SPECIALS = frozenset('()<>[]:;@\\,."')
 
 
 def _escape_body(text: str) -> str:
