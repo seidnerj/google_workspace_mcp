@@ -800,3 +800,25 @@ def test_prepare_web_html_body_plain_part_keeps_paragraph_breaks():
     plain = _plain_part(base64.urlsafe_b64decode(raw_b64).decode("utf-8"))
     assert "First.Second." not in plain
     assert "First.\nSecond." in plain.replace("\r\n", "\n")
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_recipient_header_with_no_parseable_address():
+    """A non-empty To that parses to no address (semicolon separators) must be
+    rejected, not silently dropped from the message."""
+    from core.utils import UserInputError
+
+    gmail = _gmail_service()
+
+    with pytest.raises(UserInputError, match="Separate recipients with commas"):
+        await _unwrap(send_gmail_message)(
+            service=gmail,
+            people_service=_people_service_empty(),
+            user_google_email="grace@example.org",
+            to="ada@example.com; alan@example.com",
+            subject="Project sync",
+            body="Hello there",
+            include_signature=False,
+        )
+    send_calls = gmail.users.return_value.messages.return_value.send.call_args_list
+    assert not [c for c in send_calls if "body" in c.kwargs]
