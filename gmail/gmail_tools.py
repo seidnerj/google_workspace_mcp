@@ -3548,7 +3548,7 @@ async def draft_gmail_message(
     if forward_message_id:
         sender_email = from_email
         if not sender_email:
-            sender_email, _ = await _get_send_as_identity_and_signature(
+            sender_email, _, _ = await _get_send_as_identity_and_signature(
                 service, from_email=None, fallback_email=user_google_email
             )
         logger.info(
