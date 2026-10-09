@@ -7,8 +7,15 @@ generic names). No real personal data appears in this file.
 import base64
 import quopri
 import re
+from datetime import datetime, timezone
 from gmail.gmail_web_mime import (
+    BLOCKQUOTE_STYLE,
     base_text_direction,
+    build_quote_container_html,
+    build_quote_html,
+    build_quote_plain,
+    format_attribution_html,
+    format_attribution_plain,
     format_display_address,
     gmail_boundary,
     new_message_html,
@@ -120,6 +127,58 @@ class TestNewMessageHtml:
         assert "<div><br></div>" in html  # blank line
 
 
+class TestAttribution:
+    def test_plain_attribution_no_zero_pad(self):
+        dt = datetime(2026, 4, 7, 9, 5, tzinfo=timezone.utc)
+        attr = format_attribution_plain("Grace Hopper", "grace@example.org", dt)
+        # Day 7 and hour 9 are NOT zero-padded; minute IS.
+        assert (
+            attr
+            == "On Tue, 7 Apr 2026 at 9:05, Grace Hopper <grace@example.org> wrote:"
+        )
+
+    def test_html_attribution_structure(self):
+        dt = datetime(2026, 4, 7, 19, 19, tzinfo=timezone.utc)
+        attr = format_attribution_html("Grace Hopper", "grace@example.org", dt)
+        assert 'class="gmail_attr"' in attr
+        assert "On Tue, 7 Apr 2026 at 19:19, Grace Hopper" in attr
+        assert (
+            '&lt;<a href="mailto:grace@example.org">grace@example.org</a>&gt;' in attr
+        )
+        assert attr.rstrip().endswith("<br></div>")
+
+
+class TestQuote:
+    def test_plain_quote_prefixes_each_line(self):
+        quoted = build_quote_plain("hello\nworld")
+        assert quoted == "> hello\n> world"
+
+    def test_plain_quote_blank_line_has_no_trailing_space(self):
+        quoted = build_quote_plain("a\n\nb")
+        assert quoted == "> a\n>\n> b"
+
+    def test_blockquote_skeleton_exact(self):
+        parent = "<div>Parent body</div>"
+        bq = build_quote_html(parent)
+        assert bq == (
+            f'<blockquote class="gmail_quote" style="{BLOCKQUOTE_STYLE}">'
+            f"{parent}</blockquote>"
+        )
+
+    def test_container_has_quote_container_class(self):
+        dt = datetime(2026, 4, 7, 19, 19, tzinfo=timezone.utc)
+        attr = format_attribution_html("Ada Lovelace", "ada@example.com", dt)
+        container = build_quote_container_html(attr, "<div>Parent body</div>")
+        assert container.startswith('<div class="gmail_quote gmail_quote_container">')
+        assert "Parent body" in container
+
+    def test_blockquote_style_constant(self):
+        assert BLOCKQUOTE_STYLE == (
+            "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);"
+            "padding-left:1ex"
+        )
+
+
 def _decode_raw(raw_b64: str) -> str:
     return base64.urlsafe_b64decode(raw_b64.encode()).decode("utf-8")
 
@@ -139,6 +198,19 @@ def _decode_qp_parts(msg: str) -> str:
 def _new_bodies(plain="Hello there"):
     """Build the (plain, html) pair for a non-reply web compose."""
     html = new_message_html(plain_body_to_html(plain))
+    return plain, html
+
+
+def _reply_bodies(reply="Thanks!", parent_text="Original line", parent_html=None):
+    dt = datetime(2026, 4, 7, 19, 19, tzinfo=timezone.utc)
+    parent_html = parent_html or "<div>Original line</div>"
+    attr_plain = format_attribution_plain("Ada Lovelace", "ada@example.com", dt)
+    attr_html = format_attribution_html("Ada Lovelace", "ada@example.com", dt)
+    plain = f"{reply}\n\n{attr_plain}\n{build_quote_plain(parent_text)}"
+    html = (
+        f"{new_message_html(plain_body_to_html(reply))}<br>"
+        f"{build_quote_container_html(attr_html, parent_html)}"
+    )
     return plain, html
 
 
@@ -273,6 +345,26 @@ class TestPrepareWebMessage:
         msg = self._build_autobody("שלום עולם", direction="ltr")
         assert '<div dir="ltr">' in msg
         assert '<div dir="rtl">' not in msg
+
+    def test_reply_quote_in_both_parts(self):
+        plain, html = _reply_bodies()
+        raw = self._build(
+            plain=plain,
+            html=html,
+            in_reply_to="<parent@example.com>",
+            references="<parent@example.com>",
+        )
+        # Headers are not QP-encoded; assert on the raw form.
+        assert "In-Reply-To: <parent@example.com>" in raw
+        assert "References: <parent@example.com>" in raw
+        # Bodies are QP-encoded (soft-wrapped); decode before content asserts.
+        msg = _decode_qp_parts(raw)
+        assert "gmail_quote gmail_quote_container" in msg
+        assert "On Tue, 7 Apr 2026 at 19:19" in msg
+        # Parent html inherited verbatim.
+        assert "<div>Original line</div>" in msg
+        # Plain-part one-level quote prefixing.
+        assert "> Original line" in msg
 
 
 class TestNoToolFingerprints:

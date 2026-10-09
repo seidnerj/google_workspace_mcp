@@ -19,6 +19,10 @@ def _unwrap(tool):
     return fn
 
 
+def _encode(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
 def _raw_sent(mock_service) -> str:
     kwargs = mock_service.users.return_value.messages.return_value.send.call_args.kwargs
     raw = kwargs["body"]["raw"]
@@ -195,6 +199,93 @@ async def test_send_as_display_name_populates_from():
 
     raw = _raw_sent(gmail)
     assert "From: Grace Hopper <grace@example.org>" in raw
+
+
+@pytest.mark.asyncio
+async def test_reply_builds_gmail_quote_from_parent():
+    gmail = _gmail_service()
+    # Parent thread fetch (full, with bodies) for the quote + auto-threading.
+    thread_full = {
+        "messages": [
+            {
+                "id": "p1",
+                "labelIds": ["INBOX"],
+                "payload": {
+                    "headers": [
+                        {"name": "Message-ID", "value": "<parent@example.com>"},
+                        {"name": "From", "value": "Ada Lovelace <ada@example.com>"},
+                        {"name": "Subject", "value": "Project sync"},
+                        {
+                            "name": "Date",
+                            "value": "Tue, 7 Apr 2026 19:19:00 +0000",
+                        },
+                    ],
+                    "mimeType": "multipart/alternative",
+                    "parts": [
+                        {
+                            "mimeType": "text/plain",
+                            "body": {"data": _encode("Original line")},
+                        },
+                        {
+                            "mimeType": "text/html",
+                            "body": {"data": _encode("<div>Original line</div>")},
+                        },
+                    ],
+                },
+            }
+        ]
+    }
+    gmail.users().threads().get().execute.return_value = thread_full
+    # Reset call count so the assertion below measures only the send's fetch
+    # (the setup line above already invoked .get() once).
+    gmail.users.return_value.threads.return_value.get.reset_mock()
+
+    await _unwrap(send_gmail_message)(
+        service=gmail,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Project sync",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+        quote_original=True,
+    )
+
+    msg = _decode_bodies(_raw_sent(gmail))
+    # The thread is fetched exactly once (shared by auto-threading + the quote).
+    assert gmail.users.return_value.threads.return_value.get.call_count == 1
+    # Auto-populated reply headers from the thread.
+    assert "In-Reply-To: <parent@example.com>" in msg
+    assert "References: <parent@example.com>" in " ".join(msg.split())
+    # gmail_quote container + exact attribution + verbatim parent html.
+    assert "gmail_quote gmail_quote_container" in msg
+    assert "On Tue, 7 Apr 2026 at 19:19, Ada Lovelace" in msg
+    assert "<div>Original line</div>" in msg
+    assert "> Original line" in msg
+
+
+@pytest.mark.asyncio
+async def test_reply_without_parent_sends_without_quote():
+    gmail = _gmail_service()
+    gmail.users().threads().get().execute.side_effect = RuntimeError("fetch failed")
+
+    result = await _unwrap(send_gmail_message)(
+        service=gmail,
+        user_google_email="grace@example.org",
+        to="ada@example.com",
+        subject="Project sync",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+        quote_original=True,
+    )
+
+    msg = _decode_bodies(_raw_sent(gmail))
+    assert "Email sent" in result
+    assert "gmail_quote_container" not in msg
+    # Still multipart with both parts.
+    assert 'text/plain; charset="UTF-8"' in msg
+    assert 'text/html; charset="UTF-8"' in msg
 
 
 @pytest.mark.asyncio

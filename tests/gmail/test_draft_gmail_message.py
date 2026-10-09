@@ -939,7 +939,7 @@ async def test_draft_gmail_message_quotes_html_reply_with_signature():
     )
 
     assert 'data-smartmail="gmail_signature"' in html_body
-    assert '<div class="gmail_quote">' in html_body
+    assert 'class="gmail_quote' in html_body
 
 
 @pytest.mark.asyncio

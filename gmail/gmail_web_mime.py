@@ -4,6 +4,9 @@ These functions are deliberately synchronous and side-effect free so they can be
 unit-tested in isolation. Network-bound work (People API name resolution, parent
 message fetching) happens in the async Gmail tools, which feed the resulting
 strings into these builders and into ``_prepare_gmail_message``.
+
+The one verbatim external constant here is Gmail's blockquote CSS string
+(``BLOCKQUOTE_STYLE``); it is Gmail's own markup, not user data.
 """
 
 from __future__ import annotations
@@ -13,9 +16,34 @@ import html as _html
 import quopri
 import secrets
 import unicodedata
+from datetime import datetime
 from email.header import Header
 from email.utils import formataddr
 from typing import List, Optional, Tuple
+
+
+# Gmail's byte-identical blockquote style string for quoted replies.
+BLOCKQUOTE_STYLE = (
+    "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"
+)
+
+# Three-letter day/month names matching Gmail's attribution line.
+_DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+_MON = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
 
 
 def gmail_boundary() -> str:
@@ -108,6 +136,67 @@ def new_message_html(body_html: str, direction: str = "ltr") -> str:
     via the browser's Unicode bidi algorithm regardless of the base.
     """
     return f'<div dir="{direction}">{body_html}</div>'
+
+
+def _format_attribution_when(dt: datetime) -> str:
+    """Format the ``On <Dow>, <D> <Mon> <YYYY> at <H>:<MM>`` clause.
+
+    Day and hour are NOT zero-padded; minute IS zero-padded.
+    """
+    dow = _DOW[dt.weekday()]
+    mon = _MON[dt.month - 1]
+    return f"On {dow}, {dt.day} {mon} {dt.year} at {dt.hour}:{dt.minute:02d}"
+
+
+def format_attribution_plain(name: str, email: str, dt: datetime) -> str:
+    """Plain-text reply attribution line."""
+    return f"{_format_attribution_when(dt)}, {name} <{email}> wrote:"
+
+
+def format_attribution_html(name: str, email: str, dt: datetime) -> str:
+    """HTML reply attribution div (the ``gmail_attr`` div, trailing ``<br>``)."""
+    when = _format_attribution_when(dt)
+    safe_name = _escape_body(name)
+    safe_email = _html.escape(email)
+    return (
+        '<div dir="ltr" class="gmail_attr">'
+        f"{when}, {safe_name} "
+        f'&lt;<a href="mailto:{safe_email}">{safe_email}</a>&gt; wrote:<br></div>'
+    )
+
+
+def build_quote_plain(parent_text: str) -> str:
+    """Prefix each parent line with Gmail's one-level ``> `` quote marker.
+
+    Blank lines become a bare ``>`` (no trailing space). Inner quoting in the
+    parent body is inherited verbatim (Gmail only adds its own one level).
+    """
+    out = []
+    for line in parent_text.split("\n"):
+        out.append(">" if line == "" else f"> {line}")
+    return "\n".join(out)
+
+
+def build_quote_html(parent_html: str) -> str:
+    """Wrap the parent HTML body in Gmail's blockquote (no attribution div).
+
+    The attribution div is assembled separately so the container can be built
+    as: container-open + attribution + blockquote + container-close.
+    """
+    return (
+        f'<blockquote class="gmail_quote" style="{BLOCKQUOTE_STYLE}">'
+        f"{parent_html}</blockquote>"
+    )
+
+
+def build_quote_container_html(attribution_html: str, parent_html: str) -> str:
+    """Assemble the full ``gmail_quote gmail_quote_container`` div for a reply."""
+    return (
+        '<div class="gmail_quote gmail_quote_container">'
+        f"{attribution_html}"
+        f"{build_quote_html(parent_html)}"
+        "</div>"
+    )
 
 
 def _qp_encode(text: str) -> str:

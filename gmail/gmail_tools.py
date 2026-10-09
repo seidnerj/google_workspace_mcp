@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlparse, urlunsplit
 from email.header import Header
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
 
 import httpx
 from fastmcp.exceptions import ToolError as ToolExecutionError
@@ -75,6 +75,7 @@ from gmail.gmail_helpers import (
     _derive_reply_all_recipients,
     _derive_reply_headers,
     _fetch_with_retry,
+    _parse_date_header,
     _get_send_as_identity_and_signature,
     _http_error_status,
     _is_email_reaction,
@@ -91,7 +92,11 @@ from gmail.gmail_helpers import (
 from gmail.gmail_web_mime import (
     assemble_alternative,
     base_text_direction,
+    build_quote_container_html,
+    build_quote_plain,
     encode_raw,
+    format_attribution_html,
+    format_attribution_plain,
     format_display_address,
     gmail_boundary,
     new_message_html,
@@ -662,33 +667,6 @@ def _append_signature_to_body(
     return f"{body}{separator}{signature_text}"
 
 
-async def _fetch_original_for_quote(
-    service, thread_id: str, in_reply_to: Optional[str] = None
-) -> Optional[dict]:
-    """Fetch the original message from a thread for quoting in a reply.
-
-    When *in_reply_to* is provided the function looks for that specific
-    Message-ID inside the thread.  Otherwise it falls back to the last
-    message in the thread.
-
-    Returns a dict with keys: sender, date, text_body, html_body -- or
-    *None* when the message cannot be retrieved.
-    """
-    context = await _fetch_thread_reply_context(
-        service, thread_id, in_reply_to=in_reply_to, include_bodies=True
-    )
-    if not context or not context.get("target"):
-        return None
-
-    target = context["target"]
-    return {
-        "sender": target.get("from") or "unknown",
-        "date": target.get("date", ""),
-        "text_body": target.get("text_body", ""),
-        "html_body": target.get("html_body", ""),
-    }
-
-
 def _build_quoted_reply_body(
     reply_body: str,
     body_format: Literal["plain", "html"],
@@ -696,6 +674,10 @@ def _build_quoted_reply_body(
     original: dict,
 ) -> str:
     """Assemble reply body + signature + quoted original message.
+
+    Used only for replies that carry attachments, which still take the
+    EmailMessage path; attachment-free replies use the Gmail-web quote built by
+    ``_build_web_reply_bodies``.
 
     Layout:
         reply_body
@@ -1322,6 +1304,7 @@ def _build_web_compose_raw(
     in_reply_to: Optional[str],
     references: Optional[str],
     direction: Literal["auto", "ltr", "rtl"],
+    reply_target: Optional[Dict[str, Any]],
 ) -> str:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
 
@@ -1329,7 +1312,10 @@ def _build_web_compose_raw(
     plain text, the ltr container for HTML) and delegates the deterministic MIME
     assembly to ``_prepare_gmail_message``'s web path. The reply ``Re:`` subject
     prefix is applied there, exactly as on the legacy path. ``direction`` is the
-    base text direction; ``"auto"`` detects it from the body text.
+    base text direction; ``"auto"`` detects it from the body text. When
+    ``reply_target`` (the parent message from the thread reply context, with
+    bodies) is given, Gmail's ``gmail_quote`` reply trail is appended to both
+    parts.
     """
     if body_format == "html":
         resolved_dir = (
@@ -1348,6 +1334,9 @@ def _build_web_compose_raw(
         resolved_dir = base_text_direction(body) if direction == "auto" else direction
         new_html = new_message_html(plain_body_to_html(body), resolved_dir)
 
+    if reply_target:
+        new_plain, new_html = _build_web_reply_bodies(new_plain, new_html, reply_target)
+
     raw_message, _thread, _count, _errors = _prepare_gmail_message(
         subject=subject,
         body=new_plain,
@@ -1362,6 +1351,42 @@ def _build_web_compose_raw(
         web_compose=True,
     )
     return raw_message
+
+
+def _build_web_reply_bodies(
+    new_plain: str, new_html: str, target: Dict[str, Any]
+) -> tuple[str, str]:
+    """Append a Gmail-web ``gmail_quote`` reply trail to both body parts.
+
+    ``target`` is the parent message from the thread reply context (its From,
+    Date and plain + html bodies). When the parent lacks a usable sender address
+    or date, the bodies are returned unchanged so the reply still sends, just
+    without a quote.
+    """
+    parent_name, parent_email = parseaddr(target.get("from") or "")
+    if not parent_email:
+        return new_plain, new_html
+    parent_name = parent_name.strip() or parent_email
+
+    _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
+    if parent_dt is None:
+        return new_plain, new_html
+
+    parent_text = target.get("text_body") or ""
+    if not parent_text and target.get("html_body"):
+        parent_text = _html_to_text(target["html_body"])
+    parent_html = target.get("html_body") or ""
+    if not parent_html and parent_text:
+        parent_html = "<br>".join(html.escape(line) for line in parent_text.split("\n"))
+
+    attr_plain = format_attribution_plain(parent_name, parent_email, parent_dt)
+    attr_html = format_attribution_html(parent_name, parent_email, parent_dt)
+    quoted_plain = build_quote_plain(parent_text)
+    container = build_quote_container_html(attr_html, parent_html)
+
+    reply_plain = f"{new_plain}\n\n{attr_plain}\n\n{quoted_plain}"
+    reply_html = f"{new_html}<br>{container}"
+    return reply_plain, reply_html
 
 
 def _prepare_gmail_message_web(
@@ -3086,23 +3111,25 @@ async def send_gmail_message(
         # caller's body, before any signature or quoted original is attached.
         body = html_newlines_to_br(body)
 
-    if quote_original and target_reply:
-        send_body_content = _build_quoted_reply_body(
-            body,
-            body_format,
-            signature_html,
-            {
-                "sender": target_reply.get("from") or "unknown",
-                "date": target_reply.get("date", ""),
-                "text_body": target_reply.get("text_body", ""),
-                "html_body": target_reply.get("html_body", ""),
-            },
-        )
-    else:
-        send_body_content = _append_signature_to_body(body, body_format, signature_html)
-
+    quote_target = target_reply if quote_original else None
     resolved_attachments = await _resolve_url_attachments(attachments)
     if resolved_attachments:
+        if quote_target:
+            send_body_content = _build_quoted_reply_body(
+                body,
+                body_format,
+                signature_html,
+                {
+                    "sender": quote_target.get("from") or "unknown",
+                    "date": quote_target.get("date", ""),
+                    "text_body": quote_target.get("text_body", ""),
+                    "html_body": quote_target.get("html_body", ""),
+                },
+            )
+        else:
+            send_body_content = _append_signature_to_body(
+                body, body_format, signature_html
+            )
         raw_message, thread_id_final, attached_count, attachment_errors = (
             _prepare_gmail_message(
                 subject=subject,
@@ -3123,7 +3150,7 @@ async def send_gmail_message(
         # Without attachments the message takes the Gmail-web faithful path.
         raw_message = _build_web_compose_raw(
             subject=subject,
-            body=send_body_content,
+            body=_append_signature_to_body(body, body_format, signature_html),
             body_format=body_format,
             to=to,
             cc=cc,
@@ -3133,6 +3160,7 @@ async def send_gmail_message(
             in_reply_to=in_reply_to,
             references=references,
             direction=direction,
+            reply_target=quote_target,
         )
         thread_id_final, attached_count, attachment_errors = thread_id, 0, []
 
@@ -3558,23 +3586,25 @@ async def draft_gmail_message(
     if thread_id and not subject.strip() and target_reply:
         subject = target_reply.get("subject") or subject
 
-    if quote_original and target_reply:
-        draft_body = _build_quoted_reply_body(
-            draft_body,
-            body_format,
-            signature_html,
-            {
-                "sender": target_reply.get("from") or "unknown",
-                "date": target_reply.get("date", ""),
-                "text_body": target_reply.get("text_body", ""),
-                "html_body": target_reply.get("html_body", ""),
-            },
-        )
-    else:
-        draft_body = _append_signature_to_body(draft_body, body_format, signature_html)
-
+    quote_target = target_reply if quote_original else None
     resolved_attachments = await _resolve_url_attachments(attachments)
     if resolved_attachments:
+        if quote_target:
+            draft_body = _build_quoted_reply_body(
+                draft_body,
+                body_format,
+                signature_html,
+                {
+                    "sender": quote_target.get("from") or "unknown",
+                    "date": quote_target.get("date", ""),
+                    "text_body": quote_target.get("text_body", ""),
+                    "html_body": quote_target.get("html_body", ""),
+                },
+            )
+        else:
+            draft_body = _append_signature_to_body(
+                draft_body, body_format, signature_html
+            )
         raw_message, _thread_id_final, attached_count, attachment_errors = (
             _prepare_gmail_message(
                 subject=subject,
@@ -3595,7 +3625,7 @@ async def draft_gmail_message(
         # Without attachments the draft takes the Gmail-web faithful path.
         raw_message = _build_web_compose_raw(
             subject=subject,
-            body=draft_body,
+            body=_append_signature_to_body(draft_body, body_format, signature_html),
             body_format=body_format,
             to=to,
             cc=cc,
@@ -3605,6 +3635,7 @@ async def draft_gmail_message(
             in_reply_to=in_reply_to,
             references=references,
             direction=direction,
+            reply_target=quote_target,
         )
         attached_count, attachment_errors = 0, []
 
