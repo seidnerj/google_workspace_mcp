@@ -202,12 +202,21 @@ def _is_rebound_same_origin_fetch(headers: dict, host_header: Optional[str]) -> 
         return False
     if not host_header or is_oauth21_enabled():
         return False
-    hostname = urlparse(f"//{host_header}").hostname
-    if hostname in _LOOPBACK_HOSTS:
+    host = urlparse(f"//{host_header}")
+    if host.hostname in _LOOPBACK_HOSTS:
         return False
-    return hostname not in {
-        urlparse(origin).hostname for origin in _get_allowed_http_origins()
-    }
+    try:
+        host_port = host.port
+    except ValueError:
+        return True
+    for origin in _get_allowed_http_origins():
+        parsed = urlparse(origin)
+        default_port = _DEFAULT_PORTS.get(parsed.scheme)
+        if parsed.hostname == host.hostname and (parsed.port or default_port) == (
+            host_port or default_port
+        ):
+            return False
+    return True
 
 
 def _is_null_origin_consent_compat_allowed(scope: Scope, origin: str) -> bool:

@@ -287,6 +287,23 @@ def test_origin_validation_allows_configured_host_without_origin(monkeypatch):
     )
     assert response.status_code == 200
 
+    explicit_default = client.get(
+        "/attachments/abc",
+        headers={"Host": "mcp.example.com:443", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert explicit_default.status_code == 200
+
+
+def test_origin_validation_rejects_configured_host_on_other_port(monkeypatch):
+    client = _origin_check_client(monkeypatch, external_url="https://mcp.example.com")
+
+    for host in ("mcp.example.com:9999", "mcp.example.com:bad"):
+        response = client.get(
+            "/attachments/abc",
+            headers={"Host": host, "Sec-Fetch-Site": "same-origin"},
+        )
+        assert response.status_code == 403, host
+
 
 def test_origin_validation_leaves_non_browser_and_navigation_requests_alone(
     monkeypatch,
