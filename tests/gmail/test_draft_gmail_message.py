@@ -2272,3 +2272,27 @@ async def test_send_gmail_message_rejects_an_unresolvable_thread_id():
         )
 
     mock_service.users().messages().send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_draft_gmail_message_forward_honors_direction(monkeypatch):
+    """A draft forward passes an explicit direction through, as send forwards do."""
+    captured = {}
+
+    async def fake_forward(**kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(gmail_tools, "_forward_gmail_message_impl", fake_forward)
+
+    await _unwrap(draft_gmail_message)(
+        service=Mock(),
+        user_google_email="user@example.com",
+        forward_message_id="msg123",
+        body="FYI",
+        from_email="user@example.com",
+        direction="rtl",
+    )
+
+    assert captured["direction"] == "rtl"
+    assert captured["as_draft"] is True
