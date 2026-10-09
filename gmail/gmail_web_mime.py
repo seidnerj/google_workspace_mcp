@@ -19,7 +19,7 @@ import secrets
 import unicodedata
 from datetime import datetime
 from email.header import Header
-from email.utils import encode_rfc2231, formataddr
+from email.utils import encode_rfc2231, formataddr, getaddresses
 from typing import List, Optional, Tuple
 
 
@@ -81,6 +81,19 @@ def format_display_address(name: Optional[str], email: str) -> str:
         # Non-ASCII name: RFC2047 encoded-word for the display phrase.
         encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998)
         return f"{encoded_name} <{safe_email}>"
+
+
+def format_address_list(value: str) -> str:
+    """RFC 2047 encode non-ASCII display names in a To/Cc/Bcc address list.
+
+    An all-ASCII value is returned unchanged (byte-identical to the input);
+    otherwise each address is reformatted with ``format_display_address``.
+    """
+    if value.isascii():
+        return value
+    return ", ".join(
+        format_display_address(name, addr) for name, addr in getaddresses([value])
+    )
 
 
 def _escape_body(text: str) -> str:
@@ -318,8 +331,11 @@ def _qp_encode(text: str) -> str:
     """Quoted-printable encode text with CRLF line endings (76-col soft wrap)."""
     # Normalize to CRLF so quopri's soft-wrapping operates on canonical lines.
     raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
-    encoded = quopri.encodestring(raw)
-    return encoded.decode("ascii")
+    encoded = quopri.encodestring(raw).decode("ascii")
+    # binascii.b2a_qp emits bare-LF soft breaks ("=\n") when the input has no
+    # CRLF to imitate (a single-line HTML part). A data CR is always encoded as
+    # =0D, so every raw LF is a line ending and can be canonicalized to CRLF.
+    return encoded.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 def choose_cte(text: str) -> str:
