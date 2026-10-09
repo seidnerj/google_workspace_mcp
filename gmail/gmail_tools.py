@@ -52,6 +52,7 @@ from core.config import (
     WORKSPACE_MCP_PORT,
     is_extended_name_lookup_enabled,
 )
+from gmail.gmail_send_transport import dispatch_transmit, resolve_effective_transport
 from core.http_utils import ssrf_safe_stream
 from core.utils import (
     GOOGLE_API_WRITE_RETRIES,
@@ -1710,6 +1711,7 @@ async def _build_web_compose_raw(
     reply_target: Optional[Dict[str, Any]],
     attachments: Optional[List[Dict[str, Any]]],
     thread_names: Optional[Dict[str, str]],
+    include_bcc_header: bool,
 ) -> tuple[str, int, List[str], bool, set]:
     """Assemble a Gmail-web faithful raw message for the send/draft tools.
 
@@ -1781,6 +1783,7 @@ async def _build_web_compose_raw(
         from_name=from_name,
         web_compose=True,
         attachments=attachments,
+        include_bcc_header=include_bcc_header,
     )
     # A RECIPIENT is "unresolved" if we looked it up (no inline name) and got
     # nothing from contacts or the thread. The sender is excluded: its name
@@ -1846,6 +1849,7 @@ def _prepare_gmail_message_web(
     from_email: Optional[str] = None,
     from_name: Optional[str] = None,
     attachments: Optional[List[Dict]] = None,
+    include_bcc_header: bool = True,
 ) -> tuple[str, int, List[str]]:
     """Assemble a Gmail-web faithful message.
 
@@ -1884,7 +1888,7 @@ def _prepare_gmail_message_web(
         headers.append(("References", folded))
     if in_reply_to:
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
-    if bcc:
+    if bcc and include_bcc_header:
         headers.append(("Bcc", _safe_header("Bcc", bcc)))
     # Guard the caller-supplied subject for header injection BEFORE encoding.
     # A long non-ASCII subject RFC2047-folds into a multi-line continuation; with
@@ -1955,6 +1959,7 @@ def _prepare_gmail_message(
     web_compose: bool = False,
     html_body: Optional[str] = None,
     direction: Literal["auto", "ltr", "rtl"] = "auto",
+    include_bcc_header: bool = True,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
@@ -2036,6 +2041,7 @@ def _prepare_gmail_message(
             from_email=from_email,
             from_name=from_name,
             attachments=attachments or None,
+            include_bcc_header=include_bcc_header,
         )
         return raw_message, thread_id, web_count, web_errors
 
@@ -2061,7 +2067,7 @@ def _prepare_gmail_message(
         message["To"] = to
     if cc:
         message["Cc"] = cc
-    if bcc:
+    if bcc and include_bcc_header:
         message["Bcc"] = bcc
 
     # Add reply headers for threading
@@ -3531,6 +3537,14 @@ async def send_gmail_message(
         body = html_newlines_to_br(body)
 
     resolved_attachments = await _resolve_url_attachments(attachments)
+    # Resolve send transport before building the raw message so we know whether
+    # to include the Bcc header (API keeps it; SMTP omits it - envelope-only).
+    # Off-thread: with the GCS credential-store backend this can do a blocking
+    # download, which must not stall the event loop.
+    effective, transport_creds, fallback_note = await asyncio.to_thread(
+        resolve_effective_transport, user_google_email
+    )
+
     # Every send (with or without attachments) takes the Gmail-web faithful path.
     (
         raw_message,
@@ -3554,6 +3568,7 @@ async def send_gmail_message(
         reply_target=target_reply if quote_original else None,
         attachments=resolved_attachments or None,
         thread_names=send_thread_names,
+        include_bcc_header=(effective == "api"),
     )
     thread_id_final = thread_id
     # Note only when a recipient actually went unresolved AND more scope would
@@ -3574,25 +3589,31 @@ async def send_gmail_message(
             f"{details}"
         )
 
-    send_body = {"raw": raw_message}
-
-    # Associate with thread if provided
-    if thread_id_final:
-        send_body["threadId"] = thread_id_final
-
-    # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
+    attachment_info = (
+        _format_attachment_result(attached_count, requested_attachment_count)
+        if requested_attachment_count > 0
+        else ""
     )
-    message_id = sent_message.get("id")
 
-    if requested_attachment_count > 0:
-        attachment_info = _format_attachment_result(
-            attached_count, requested_attachment_count
-        )
-        return f"Email sent{attachment_info}! Message ID: {message_id}{name_note}"
-    return f"Email sent! Message ID: {message_id}{name_note}"
+    return await dispatch_transmit(
+        service,
+        effective=effective,
+        creds=transport_creds,
+        fallback_note=fallback_note,
+        raw_message_b64=raw_message,
+        thread_id_final=thread_id_final,
+        sender=sender_email,
+        to=[to] if to else None,
+        cc=[cc] if cc else None,
+        bcc=[bcc] if bcc else None,
+        # Display/label only; the authoritative Subject header is already baked
+        # into raw_message (inherited/prefixed inside _build_web_compose_raw).
+        subject=subject or "",
+        user_google_email=user_google_email,
+        action_label="Email sent",
+        attachment_info=attachment_info,
+        trailing_note=name_note,
+    )
 
 
 # Internal implementation function for testing
@@ -3769,6 +3790,15 @@ async def _forward_gmail_message_impl(
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
+
+    # Resolve send transport before building the raw message so we know whether
+    # to include the Bcc header (API keeps it; SMTP omits it - envelope-only).
+    # Off-thread: with the GCS credential-store backend this can do a blocking
+    # download, which must not stall the event loop.
+    effective, transport_creds, fallback_note = await asyncio.to_thread(
+        resolve_effective_transport, user_google_email
+    )
+
     raw_message, attached_count, attachment_errors = _prepare_gmail_message_web(
         subject=forward_subject,
         plain_body=forward_plain,
@@ -3779,6 +3809,7 @@ async def _forward_gmail_message_impl(
         from_email=sender_email,
         from_name=from_name,
         attachments=attachments_to_send if attachments_to_send else None,
+        include_bcc_header=(effective == "api"),
     )
     if attachments_to_send and attached_count != len(attachments_to_send):
         details = (
@@ -3789,21 +3820,29 @@ async def _forward_gmail_message_impl(
             f"{attached_count}/{len(attachments_to_send)} attached.{details}"
         )
 
-    send_body = {"raw": raw_message}
-
-    # Send the message
-    sent_message = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
-    )
-    sent_message_id = sent_message.get("id")
-
     attachment_info = (
         _format_attachment_result(attached_count, len(attachments_to_send))
         if attachments_to_send
         else ""
     )
-    return f"Email forwarded{attachment_info}! Message ID: {sent_message_id}"
+
+    return await dispatch_transmit(
+        service,
+        effective=effective,
+        creds=transport_creds,
+        fallback_note=fallback_note,
+        raw_message_b64=raw_message,
+        thread_id_final=None,
+        sender=sender_email,
+        to=[to] if to else None,
+        cc=[cc] if cc else None,
+        bcc=[bcc] if bcc else None,
+        subject=forward_subject,
+        user_google_email=user_google_email,
+        action_label="Email forwarded",
+        attachment_info=attachment_info,
+        trailing_note="",
+    )
 
 
 @server.tool(
@@ -4099,6 +4138,7 @@ async def draft_gmail_message(
         reply_target=target_reply if quote_original else None,
         attachments=resolved_attachments or None,
         thread_names=draft_thread_names,
+        include_bcc_header=True,
     )
     name_note = (
         _build_name_fallback_note(people_service is None, missing_scopes)
