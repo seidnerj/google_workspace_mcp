@@ -3343,8 +3343,11 @@ async def _forward_gmail_message_impl(
 
     # --- Build forwarded bodies via Gmail-web faithful builders ---
 
-    # When the original has no HTML body, synthesize one from plain text
-    # (mirrors how _build_web_reply_bodies derives html from plain).
+    # Fill whichever body the original lacks from the other (mirrors
+    # _build_web_reply_bodies): an HTML-only original still needs its text in
+    # the forward's text/plain part, keeping block breaks.
+    if not orig_plain and orig_html:
+        orig_plain = html_to_text_preserving_breaks(orig_html).strip()
     if not orig_html and orig_plain:
         orig_html = "<br>".join(html.escape(line) for line in orig_plain.split("\n"))
 
