@@ -207,6 +207,32 @@ async def test_forward_html_email():
 
 
 @pytest.mark.asyncio
+async def test_forward_html_only_original_fills_plain_part():
+    """An HTML-only original still yields its body in the text/plain part."""
+    message = create_mock_message(
+        subject="HTML only",
+        from_addr="alice@example.com",
+        to_addr="bob@example.com",
+        html_body="<p>First paragraph.</p><p>Second paragraph.</p>",
+    )
+    mock_service = create_mock_service(message, sent_message_id="fwd003")
+
+    await _forward_gmail_message_impl(
+        service=mock_service,
+        message_id="msg789",
+        to="recipient@example.com",
+        user_google_email="me@example.com",
+    )
+
+    plain = get_body_text(get_sent_mime_message(mock_service), subtype="plain")
+    assert "Forwarded message" in plain
+    assert "First paragraph." in plain
+    assert "Second paragraph." in plain
+    assert "First paragraph.Second paragraph." not in plain
+    assert "<p>" not in plain
+
+
+@pytest.mark.asyncio
 async def test_forward_with_message_plain():
     """Forward with plain text user message prepended"""
     message = create_mock_message(

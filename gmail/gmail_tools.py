@@ -30,7 +30,11 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from pydantic.json_schema import SkipJsonSchema
 
-from auth.oauth_config import is_stateless_mode
+from auth.oauth_config import (
+    is_external_oauth21_provider,
+    is_oauth21_enabled,
+    is_stateless_mode,
+)
 from auth.service_decorator import (
     require_google_service,
     require_multiple_services,
@@ -87,6 +91,7 @@ from gmail.gmail_helpers import (
     _get_send_as_identity_and_signature,
     _http_error_status,
     _is_email_reaction,
+    _is_quota_or_rate_limit_error,
     _new_attachment_id,
     _retryable_result_ids,
     _signature_html_to_text,
@@ -979,16 +984,23 @@ async def _people_search_tier(
 ) -> Optional[str]:
     """Run one People search tier and extract a matching display name.
 
-    Best-effort: a 403 (scope not granted) records ``scope`` in ``missing_scopes``
-    and returns None; any other failure is logged and returns None. ``wrap_key``
+    Best-effort: a 401, or a 403 that is neither a quota/rate-limit error nor
+    ``accessNotConfigured`` (People API disabled for the project), means the scope
+    is not granted and records ``scope`` in ``missing_scopes``; any other failure
+    is logged. Either way it returns None. ``wrap_key``
     is the per-result wrapper field (``person`` for searchContacts/otherContacts,
     None for searchDirectoryPeople where results are person objects directly).
     """
     try:
         result = await asyncio.to_thread(request_factory(**params).execute)
     except HttpError as e:
-        status = getattr(getattr(e, "resp", None), "status", None)
-        if status in (401, 403):
+        status = _http_error_status(e)
+        scope_error = status == 401 or (
+            status == 403
+            and not _is_quota_or_rate_limit_error(e)
+            and "accessnotconfigured" not in f"{e} {e.content!r}".lower()
+        )
+        if scope_error:
             if missing_scopes is not None:
                 missing_scopes.add(scope)
         else:
@@ -1196,11 +1208,20 @@ def _build_name_fallback_note(
     listed = "; ".join(
         label for scope, label in _NAME_SCOPE_LABELS.items() if scope in scopes
     )
+    if not is_oauth21_enabled():
+        reauth = "re-authenticate by running start_google_auth for this account"
+    elif is_external_oauth21_provider():
+        reauth = (
+            "provide an OAuth 2.1 bearer token in the Authorization header that "
+            "carries these scopes"
+        )
+    else:
+        reauth = "sign in again through your MCP client's OAuth 2.1 flow"
     return (
         "\n\n[Heads up] Some recipient display names could not be resolved, so "
-        "those addresses were sent as bare emails. For Gmail-web-style names, "
-        f"grant: {listed}. Enable the 'contacts' tool (it requests these scopes) "
-        "and re-authenticate by running start_google_auth for this account."
+        "those addresses were written as bare addresses. For Gmail-web-style "
+        f"names, grant: {listed}. Enable the 'contacts' tool (it requests these "
+        f"scopes) and {reauth}."
     )
 
 
@@ -1709,9 +1730,17 @@ async def _resolve_url_attachments(
     return resolved
 
 
-# A body that already opens with a ``<div dir=...>`` container; group ``dir``
-# spans the attribute value (quoted or bare).
-_LEADING_DIR_DIV_RE = re.compile(r"\s*<div dir=(?P<dir>\"[^\"]*\"|'[^']*'|[^\s>]+)")
+# A body that already opens with a ``<div ... dir=...>`` container; group
+# ``dir`` spans the attribute value (quoted or bare). Attributes before ``dir``
+# are consumed whole (name plus quoted or bare value), so ``dir=`` text inside
+# another attribute's quoted value is never mistaken for the attribute itself.
+_HTML_ATTR_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+)"
+_LEADING_DIR_DIV_RE = re.compile(
+    r"\s*<div"
+    rf"(?:\s+(?!dir\s*=)[^\s\"'>/=]+(?:\s*=\s*{_HTML_ATTR_VALUE})?)*"
+    rf"\s+dir\s*=\s*(?P<dir>{_HTML_ATTR_VALUE})",
+    re.IGNORECASE,
+)
 
 
 def _derive_web_bodies(
@@ -3772,8 +3801,11 @@ async def _forward_gmail_message_impl(
 
     # --- Build forwarded bodies via Gmail-web faithful builders ---
 
-    # When the original has no HTML body, synthesize one from plain text
-    # (mirrors how _build_web_reply_bodies derives html from plain).
+    # Fill whichever body the original lacks from the other (mirrors
+    # _build_web_reply_bodies): an HTML-only original still needs its text in
+    # the forward's text/plain part, keeping block breaks.
+    if not orig_plain and orig_html:
+        orig_plain = html_to_text_preserving_breaks(orig_html).strip()
     if not orig_html and orig_plain:
         orig_html = "<br>".join(html.escape(line) for line in orig_plain.split("\n"))
 
