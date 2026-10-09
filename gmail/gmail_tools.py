@@ -91,6 +91,7 @@ from gmail.gmail_helpers import (
 from gmail.gmail_web_mime import (
     assemble_alternative,
     encode_raw,
+    format_address_list,
     format_display_address,
     gmail_boundary,
     new_message_html,
@@ -1308,6 +1309,23 @@ async def _resolve_url_attachments(
     return resolved
 
 
+def _derive_web_bodies(
+    body: str, body_format: Literal["plain", "html"]
+) -> tuple[str, str]:
+    """Derive the (text/plain, text/html) parts of a Gmail-web compose.
+
+    Plain text becomes Gmail's typed ``<div>`` structure inside the ltr
+    container; HTML is wrapped in that container unless it already starts with
+    one, and its plain part keeps block breaks.
+    """
+    if body_format == "html":
+        html_part = (
+            body if body.lstrip().startswith("<div dir=") else new_message_html(body)
+        )
+        return html_to_text_preserving_breaks(body).strip(), html_part
+    return body, new_message_html(plain_body_to_html(body))
+
+
 def _build_web_compose_raw(
     *,
     subject: str,
@@ -1328,14 +1346,7 @@ def _build_web_compose_raw(
     assembly to ``_prepare_gmail_message``'s web path. The reply ``Re:`` subject
     prefix is applied there, exactly as on the legacy path.
     """
-    if body_format == "html":
-        new_html = (
-            body if body.lstrip().startswith("<div dir=") else new_message_html(body)
-        )
-        new_plain = html_to_text_preserving_breaks(body).strip()
-    else:
-        new_plain = body
-        new_html = new_message_html(plain_body_to_html(body))
+    new_plain, new_html = _derive_web_bodies(body, body_format)
 
     raw_message, _thread, _count, _errors = _prepare_gmail_message(
         subject=subject,
@@ -1369,8 +1380,8 @@ def _prepare_gmail_message_web(
 
     ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
     text/html parts built by the caller. Returns the base64url raw message.
-    To/Cc/Bcc are expected pre-formatted; From is formatted here from
-    ``from_email`` + optional ``from_name``.
+    To/Cc/Bcc are validated, then any non-ASCII display names are RFC 2047
+    encoded; From is formatted here from ``from_email`` + optional ``from_name``.
     """
 
     # Reject CR/LF in any user-controlled header value before assembly: bare
@@ -1391,7 +1402,7 @@ def _prepare_gmail_message_web(
     if in_reply_to:
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
     if bcc:
-        headers.append(("Bcc", _safe_header("Bcc", bcc)))
+        headers.append(("Bcc", format_address_list(_safe_header("Bcc", bcc))))
     # Guard the caller-supplied subject for header injection BEFORE encoding.
     # A long non-ASCII subject RFC2047-folds into a multi-line continuation; with
     # linesep="\r\n" that is a valid RFC5322 fold, but _safe_header would reject
@@ -1411,9 +1422,9 @@ def _prepare_gmail_message_web(
             )
         )
     if to:
-        headers.append(("To", _safe_header("To", to)))
+        headers.append(("To", format_address_list(_safe_header("To", to))))
     if cc:
-        headers.append(("Cc", _safe_header("Cc", cc)))
+        headers.append(("Cc", format_address_list(_safe_header("Cc", cc))))
 
     message = assemble_alternative(
         headers=headers,
@@ -1487,16 +1498,8 @@ def _prepare_gmail_message(
         if html_body is not None:
             plain_part = body
             html_part = html_body
-        elif normalized_format == "html":
-            html_part = (
-                body
-                if body.lstrip().startswith("<div dir=")
-                else new_message_html(body)
-            )
-            plain_part = html_to_text_preserving_breaks(body).strip()
         else:
-            plain_part = body
-            html_part = new_message_html(plain_body_to_html(body))
+            plain_part, html_part = _derive_web_bodies(body, normalized_format)
 
         raw_message = _prepare_gmail_message_web(
             subject=reply_subject,
