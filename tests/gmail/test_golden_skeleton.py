@@ -214,3 +214,65 @@ def test_bare_void_element_keeps_redaction_scoped():
     # The gmail_attr inner text is redacted; the trailing span structure remains.
     assert "<span>" in out
     assert "secret" not in out
+
+
+def test_html_tags_redact_free_text_attributes():
+    raw = _make_raw(
+        '<div title="Jane Roe" data-owner="Jane Roe" class="gmail_quote">'
+        "<a href='https://example.com/jane-roe'>x</a>"
+        '<img alt="Jane Roe" src="https://example.com/jane.png"></div>'
+    )
+    tags = "".join(extract_skeleton(raw)["html_tags"])
+    assert "Jane" not in tags and "jane" not in tags, tags
+    assert 'class="gmail_quote"' in tags, tags
+
+
+def test_sanitize_html_keeps_only_structural_attribute_values():
+    out = sanitize_html(
+        '<div dir="rtl" class="gmail_attr" title="Jane Roe" data-x="Jane Roe" '
+        "style=\"font-family:'Jane Roe Sans';background:url(https://example.com/jane)\">"
+        "</div>"
+    )
+    assert "Jane" not in out and "jane" not in out, out
+    assert 'dir="rtl"' in out and 'class="gmail_attr"' in out, out
+    assert "font-family:" in out, out
+
+
+def test_blockquote_style_redacts_free_text_but_keeps_structure():
+    raw = _make_raw(
+        '<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;'
+        "font-family:'Jane Roe'\">q</blockquote>"
+    )
+    style = extract_skeleton(raw)["html_probes"]["blockquote_style"]
+    assert "Jane" not in style, style
+    assert style.startswith("margin:0px 0px 0px 0.8ex;"), style
+
+
+def test_blockquote_style_of_gmail_quote_is_unchanged():
+    style = "margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"
+    raw = _make_raw(f'<blockquote class="gmail_quote" style="{style}">q</blockquote>')
+    assert extract_skeleton(raw)["html_probes"]["blockquote_style"] == style
+
+
+def test_attr_line_without_comma_is_fully_redacted():
+    out = _plain_line_structure("On Alice <alice@example.com> wrote:")
+    assert len(out) == 1 and out[0].startswith("ATTR_LINE"), out
+    assert "Alice" not in out[0] and "alice" not in out[0], out
+
+
+def test_attr_line_never_leaks_date_or_name():
+    out = _plain_line_structure("On Mon, 2 Jun 2025, Jane Roe <j@example.com> wrote:")
+    assert "Mon" not in out[0] and "Jane" not in out[0], out
+
+
+def test_boundary_pattern_masks_non_hex_characters():
+    msg = email.mime.multipart.MIMEMultipart("alternative", boundary="Molly_Smith=0a")
+    msg.attach(email.mime.text.MIMEText("x", "plain", "utf-8"))
+    pattern = extract_skeleton(msg.as_bytes())["mime_tree"][0]["boundary_pattern"]
+    assert "Molly" not in pattern and "Smith" not in pattern, pattern
+    assert pattern.endswith("=xx"), pattern
+
+
+def test_gmail_boundary_shape_is_preserved():
+    sk = extract_skeleton(RAW)
+    assert sk["mime_tree"][0]["boundary_pattern"] == "x" * 28
