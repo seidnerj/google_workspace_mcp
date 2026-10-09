@@ -8,6 +8,7 @@ unrecoverable send.
 
 import os
 import sys
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -127,3 +128,16 @@ async def test_draft_gmail_message_rejects_escaped_body(body):
             include_signature=False,
         )
     mock_service.users.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["&lt;a" + " " * 50_000, "&lt;a x" + " " * 50_000],
+    ids=["tag-name-then-spaces", "attribute-then-spaces"],
+)
+def test_unclosed_escaped_tag_is_matched_in_linear_time(body):
+    """A long escaped '<' with no closing delimiter must not backtrack
+    quadratically; it is prose, so it is allowed."""
+    start = time.perf_counter()
+    _reject_entity_escaped_html_body(body, "html")
+    assert time.perf_counter() - start < 0.5

@@ -696,10 +696,13 @@ async def _fetch_original_for_quote(
 # matched. Named, decimal and hex references all decode to the same '<' and '>'.
 # The opening tag must be closed by '>' or an escaped '>' (attributes allowed in
 # between), so prose such as "&lt;hello world" is not mistaken for a tag.
+# The attribute run starts with a non-space character so it cannot overlap the
+# whitespace before it; overlapping alternatives backtrack quadratically on a
+# long unclosed input.
 _ESCAPED_LT = r"&(?:lt|#0*60|#x0*3c);"
 _ESCAPED_GT = r"&(?:gt|#0*62|#x0*3e);"
 _ESCAPED_HTML_OPENING_TAG = re.compile(
-    rf"^\s*{_ESCAPED_LT}\s*[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*?)?/?\s*(?:>|{_ESCAPED_GT})",
+    rf"^\s*{_ESCAPED_LT}\s*[A-Za-z][A-Za-z0-9-]*(?:\s+[^<>\s][^<>]*|\s*(?:/\s*)?)(?:>|{_ESCAPED_GT})",
     re.IGNORECASE,
 )
 _RAW_HTML_TAG = re.compile(r"<\s*/?\s*[A-Za-z][A-Za-z0-9-]*(?:\s|/|>)")
