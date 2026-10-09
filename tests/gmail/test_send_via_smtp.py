@@ -151,3 +151,24 @@ async def test_send_via_smtp_starttls_uses_verifying_context(monkeypatch):
     assert isinstance(s.starttls_context, ssl.SSLContext)
     assert s.starttls_context.verify_mode == ssl.CERT_REQUIRED
     assert s.starttls_context.check_hostname is True
+
+
+@pytest.mark.asyncio
+async def test_send_via_smtp_returns_partially_refused_recipients(monkeypatch):
+    """sendmail raises only when ALL recipients are refused; a partial refusal
+    comes back as a dict that must reach the caller, not be discarded."""
+
+    class PartialSMTP(FakeSMTP):
+        def sendmail(self, frm, to, msg):
+            self.sent = (frm, to, msg)
+            return {"b@example.com": (550, b"5.1.1 No such user")}
+
+    monkeypatch.setattr(t.smtplib, "SMTP", PartialSMTP)
+    refused = await t.send_via_smtp(
+        "me@example.com",
+        ["a@example.com", "b@example.com"],
+        b"raw-bytes",
+        "me@example.com",
+        "TOKEN123",
+    )
+    assert refused == {"b@example.com": (550, b"5.1.1 No such user")}

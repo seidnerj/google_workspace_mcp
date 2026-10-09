@@ -116,7 +116,7 @@ class TestSendSmtpPath:
 
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             smtp_calls.append({"sender": sender, "recipients": recipients})
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")
@@ -146,7 +146,7 @@ class TestSendSmtpPath:
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             captured["raw"] = raw_bytes
             captured["recipients"] = recipients
-            return "OK"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")
@@ -176,7 +176,7 @@ class TestSendSmtpPath:
 
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             captured["recipients"] = recipients
-            return "OK"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")
@@ -205,7 +205,7 @@ class TestForwardSmtpPath:
 
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             smtp_calls.append(True)
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")
@@ -231,7 +231,7 @@ class TestForwardSmtpPath:
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             captured["raw"] = raw_bytes
             captured["recipients"] = recipients
-            return "OK"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")
@@ -257,7 +257,7 @@ class TestForwardSmtpPath:
 
         async def fake_smtp(sender, recipients, raw_bytes, user_email, token):
             captured["recipients"] = recipients
-            return "OK"
+            return {}
 
         monkeypatch.setattr(transport_mod, "send_via_smtp", fake_smtp)
         _patch_transport(monkeypatch, "smtp", _smtp_creds(), "")

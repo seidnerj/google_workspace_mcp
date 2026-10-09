@@ -181,7 +181,7 @@ class TestDispatchTransmitApiPath:
 class TestDispatchTransmitSmtpPath:
     @pytest.mark.asyncio
     async def test_smtp_happy_path_finds_message_id(self, monkeypatch):
-        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value="OK queued"))
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
 
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
         service = _make_service(list_result={"messages": [{"id": "smtp-msg-1"}]})
@@ -205,14 +205,16 @@ class TestDispatchTransmitSmtpPath:
         )
 
         assert "via SMTP!" in result
-        assert "queued: OK queued" in result
+        # The AUTH reply is not a queue/DATA status; it must not be shown as one.
+        assert "queued" not in result
+        assert "refused" not in result
         assert "Message ID: smtp-msg-1" in result
         # messages().send should NOT have been called
         service.users().messages().send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_smtp_lookup_no_match(self, monkeypatch):
-        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value="OK queued"))
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
         service = _make_service(list_result={"messages": []})
 
@@ -239,7 +241,7 @@ class TestDispatchTransmitSmtpPath:
 
     @pytest.mark.asyncio
     async def test_smtp_missing_readonly_scope(self, monkeypatch):
-        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value="OK queued"))
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
         # Use a scope that does NOT imply readonly (mail.google.com implies readonly
         # via the hierarchy, so use a narrow send-only scope to exercise the branch).
         creds = _make_creds(scopes=["https://www.googleapis.com/auth/gmail.send"])
@@ -270,7 +272,7 @@ class TestDispatchTransmitSmtpPath:
 
     @pytest.mark.asyncio
     async def test_smtp_lookup_raises_degrades_gracefully(self, monkeypatch):
-        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value="OK queued"))
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
 
         # Make list().execute raise
@@ -310,7 +312,7 @@ class TestDispatchTransmitSmtpPath:
 
         async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
             captured["envelope"] = envelope_recipients
-            return "OK"
+            return {}
 
         monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE])
@@ -346,7 +348,7 @@ class TestDispatchTransmitSmtpPath:
 
         async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
             captured["raw_bytes"] = raw_bytes
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
@@ -388,7 +390,7 @@ class TestDispatchTransmitSmtpPath:
         captured = {}
 
         async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
@@ -447,7 +449,7 @@ class TestDispatchTransmitSmtpPath:
         async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
             captured["sender"] = sender
             captured["raw"] = raw_bytes
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
@@ -497,7 +499,7 @@ class TestDispatchTransmitSmtpPath:
 
         async def fake_smtp(sender, envelope_recipients, raw_bytes, user_email, token):
             captured["raw_bytes"] = raw_bytes
-            return "OK queued"
+            return {}
 
         monkeypatch.setattr(t, "send_via_smtp", fake_smtp)
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
@@ -555,7 +557,7 @@ class TestDispatchTransmitSmtpPath:
     @pytest.mark.asyncio
     async def test_smtp_expired_creds_refreshed(self, monkeypatch):
         """When creds are expired, refresh() must be called before sending."""
-        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value="OK"))
+        monkeypatch.setattr(t, "send_via_smtp", AsyncMock(return_value={}))
 
         # MagicMock tracks calls automatically.
         creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE])
@@ -588,3 +590,37 @@ class TestDispatchTransmitSmtpPath:
 
         # creds.refresh is a MagicMock attribute - assert it was called once.
         creds.refresh.assert_called_once()
+
+
+class TestDispatchTransmitSmtpRefused:
+    @pytest.mark.asyncio
+    async def test_smtp_partial_refusal_reported_in_result(self, monkeypatch):
+        monkeypatch.setattr(
+            t,
+            "send_via_smtp",
+            AsyncMock(return_value={"carol@example.com": (550, b"5.1.1 No such user")}),
+        )
+        creds = _make_creds(scopes=[MAIL_GOOGLE_COM_SCOPE, GMAIL_READONLY_SCOPE])
+        service = _make_service(list_result={"messages": [{"id": "smtp-msg-1"}]})
+
+        result = await t.dispatch_transmit(
+            service,
+            effective="smtp",
+            creds=creds,
+            fallback_note="",
+            raw_message_b64=_RAW_MSG,
+            thread_id_final=None,
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=["carol@example.com"],
+            bcc=None,
+            subject="hi",
+            user_google_email=_USER,
+            action_label="Email sent",
+            attachment_info="",
+            trailing_note="",
+        )
+
+        assert "via SMTP!" in result
+        assert "refused 1 recipient" in result
+        assert "carol@example.com (550 5.1.1 No such user)" in result

@@ -30,16 +30,18 @@ async def send_via_smtp(
     raw_bytes: bytes,
     user_email: str,
     access_token: str,
-) -> str:
+) -> dict[str, tuple[int, bytes]]:
     """Submit *raw_bytes* (a complete RFC 822 message) via smtp.gmail.com:587.
 
     Authentication uses the XOAUTH2 mechanism.  SMTP/auth errors propagate to
     the caller unchanged - no swallowing, no fallback.
 
-    Returns the decoded AUTH response string from the server.
+    Returns the recipients the server refused, mapped to ``(code, message)``.
+    ``sendmail`` raises only when EVERY recipient is refused; a partial refusal
+    comes back here and is empty when all were accepted.
     """
 
-    def _send() -> str:
+    def _send() -> dict[str, tuple[int, bytes]]:
         auth_string = f"user={user_email}\x01auth=Bearer {access_token}\x01\x01"
         b64 = base64.b64encode(auth_string.encode("ascii")).decode("ascii")
 
@@ -59,8 +61,7 @@ async def send_via_smtp(
                 code, response = smtp.docmd("")
             if code != 235:
                 raise smtplib.SMTPAuthenticationError(code, response)
-            smtp.sendmail(sender, envelope_recipients, raw_bytes)
-            return response.decode() if isinstance(response, bytes) else str(response)
+            return smtp.sendmail(sender, envelope_recipients, raw_bytes)
 
     return await asyncio.to_thread(_send)
 
@@ -254,7 +255,7 @@ async def _dispatch_smtp(
         ]
     )
 
-    resp = await send_via_smtp(
+    refused = await send_via_smtp(
         sender,
         envelope_recipients,
         raw_bytes,
@@ -268,9 +269,22 @@ async def _dispatch_smtp(
         creds=creds,
         msgid=msgid,
         action_label=action_label,
-        resp=resp,
     )
-    return f"{action_label}{attachment_info} via SMTP! (queued: {resp}) {mid_suffix}{trailing_note}"
+    return f"{action_label}{attachment_info} via SMTP! {mid_suffix}{_refused_note(refused)}{trailing_note}"
+
+
+def _refused_note(refused: dict[str, tuple[int, bytes]]) -> str:
+    """Describe recipients the SMTP server refused while accepting the rest."""
+    if not refused:
+        return ""
+    details = []
+    for addr, (code, msg) in refused.items():
+        text = msg.decode(errors="replace") if isinstance(msg, bytes) else str(msg)
+        details.append(f"{addr} ({code} {text})")
+    return (
+        f" Warning: the SMTP server refused {len(refused)} recipient(s), who will"
+        f" not receive this message: {'; '.join(details)}."
+    )
 
 
 async def _lookup_message_id(
@@ -279,7 +293,6 @@ async def _lookup_message_id(
     creds,
     msgid: str,
     action_label: str,
-    resp: str,
 ) -> str:
     """Return the message-id fragment to append; never raises."""
     try:
