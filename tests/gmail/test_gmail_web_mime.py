@@ -584,3 +584,99 @@ class TestNonAsciiSubjectEncoding:
             for part, charset in decoded_parts
         )
         assert decoded == original, f"Round-trip failed: {decoded!r} != {original!r}"
+
+
+class TestQpCanonicalLineEndings:
+    """QP soft breaks must be CRLF even when the part has no newline."""
+
+    def test_long_single_line_has_no_bare_lf(self):
+        from gmail.gmail_web_mime import _qp_encode
+
+        encoded = _qp_encode("<div>" + "a" * 200 + "</div>")
+        assert "=\r\n" in encoded
+        assert "\n" not in encoded.replace("\r\n", "")
+
+    def test_long_single_line_html_part_in_message_has_no_bare_lf(self):
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        raw, *_ = _prepare_gmail_message(
+            subject="Long line",
+            body="x" * 300,
+            to="to@example.com",
+            from_email="from@example.com",
+            web_compose=True,
+        )
+        msg = _decode_raw(raw)
+        assert "\n" not in msg.replace("\r\n", "")
+        assert "x" * 300 in _decode_qp_parts(msg)
+
+
+class TestNonAsciiRecipientEncoding:
+    """Non-ASCII recipient display names must be RFC 2047 encoded."""
+
+    def _header(self, msg: str, name: str) -> str:
+        return next(line for line in msg.split("\r\n") if line.startswith(f"{name}:"))
+
+    def _build(self, **kwargs):
+        from gmail.gmail_tools import _prepare_gmail_message
+
+        raw, *_ = _prepare_gmail_message(
+            subject="Hi",
+            body="body",
+            from_email="from@example.com",
+            web_compose=True,
+            **kwargs,
+        )
+        return _decode_raw(raw)
+
+    def test_to_cc_bcc_names_are_encoded_and_round_trip(self):
+        from email.header import decode_header, make_header
+
+        msg = self._build(
+            to="José Núñez <jose@example.com>, ada@example.com",
+            cc="Adá Lóvelace <ada@example.org>",
+            bcc="דנה <dana@example.com>",
+        )
+        for name, expected in (
+            ("To", "José Núñez <jose@example.com>, ada@example.com"),
+            ("Cc", "Adá Lóvelace <ada@example.org>"),
+            ("Bcc", "דנה <dana@example.com>"),
+        ):
+            line = self._header(msg, name)
+            assert line.isascii(), line
+            value = line[len(name) + 1 :].strip()
+            assert str(make_header(decode_header(value))) == expected
+
+    def test_ascii_recipients_are_unchanged(self):
+        value = '"Lovelace, Ada" <ada@example.com>, grace@example.org'
+        msg = self._build(to=value)
+        assert self._header(msg, "To") == f"To: {value}"
+
+    def test_line_break_in_non_ascii_recipient_is_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="line breaks"):
+            self._build(to="José <jose@example.com>\r\nBcc: evil@example.com")
+
+
+class TestForcedDirectionOnExistingWrapper:
+    """An explicit direction overrides a caller's leading <div dir=...>."""
+
+    def _html(self, body, direction):
+        from gmail.gmail_tools import _derive_web_bodies
+
+        return _derive_web_bodies(body, "html", direction)[1]
+
+    def test_forced_ltr_replaces_rtl_wrapper(self):
+        assert self._html('<div dir="rtl">Hello</div>', "ltr") == (
+            '<div dir="ltr">Hello</div>'
+        )
+
+    def test_forced_rtl_replaces_ltr_wrapper(self):
+        assert self._html("  <div dir='ltr' class=x>Hi</div>", "rtl") == (
+            '  <div dir="rtl" class=x>Hi</div>'
+        )
+
+    def test_auto_keeps_existing_wrapper(self):
+        body = '<div dir="rtl">Hello</div>'
+        assert self._html(body, "auto") == body
