@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlparse, urlunsplit
 from email.header import Header
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr, parseaddr
+from email.utils import formataddr, parseaddr, parsedate_to_datetime
 
 import httpx
 from fastmcp.exceptions import ToolError as ToolExecutionError
@@ -1391,13 +1391,19 @@ def _build_web_reply_bodies(
         return new_plain, new_html
     parent_name = parent_name.strip() or parent_email
 
-    _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
+    # Keep the parent's own UTC offset: the attribution shows the sender's
+    # wall-clock time, not UTC.
+    try:
+        parent_dt = parsedate_to_datetime(target.get("date") or "")
+    except (TypeError, ValueError):
+        _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
     if parent_dt is None:
         return new_plain, new_html
 
     parent_text = target.get("text_body") or ""
     if not parent_text and target.get("html_body"):
-        parent_text = _html_to_text(target["html_body"])
+        # Keep the parent's paragraph structure in the quoted plain text.
+        parent_text = html_to_text_preserving_breaks(target["html_body"]).strip()
     parent_html = target.get("html_body") or ""
     if not parent_html and parent_text:
         parent_html = "<br>".join(html.escape(line) for line in parent_text.split("\n"))

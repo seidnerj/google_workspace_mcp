@@ -680,3 +680,30 @@ class TestForcedDirectionOnExistingWrapper:
     def test_auto_keeps_existing_wrapper(self):
         body = '<div dir="rtl">Hello</div>'
         assert self._html(body, "auto") == body
+
+
+class TestReplyQuoteParentFidelity:
+    """The reply trail keeps the parent's own clock time and paragraph breaks."""
+
+    def _bodies(self, **target):
+        from gmail.gmail_tools import _build_web_reply_bodies
+
+        base = {"from": "Ada Lovelace <ada@example.com>"}
+        base.update(target)
+        return _build_web_reply_bodies("Reply", "<div>Reply</div>", base)
+
+    def test_attribution_keeps_parent_date_offset(self):
+        plain, html_body = self._bodies(
+            date="Fri, 27 Mar 2026 22:00:00 -0400", text_body="Hi"
+        )
+        assert "On Fri, 27 Mar 2026 at 22:00, Ada Lovelace" in plain
+        assert "On Fri, 27 Mar 2026 at 22:00, Ada Lovelace" in html_body
+
+    def test_html_only_parent_keeps_line_breaks_in_plain_quote(self):
+        plain, _ = self._bodies(
+            date="Fri, 27 Mar 2026 10:00:00 +0000",
+            html_body="<p>First paragraph.</p><p>Second paragraph.</p>",
+        )
+        assert "> First paragraph.\n" in plain
+        assert "> Second paragraph." in plain
+        assert "First paragraph. Second" not in plain
