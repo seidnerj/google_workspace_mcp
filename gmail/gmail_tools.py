@@ -3739,6 +3739,7 @@ async def draft_gmail_message(
             from_name=from_name,
             from_email=sender_email,
             user_google_email=user_google_email,
+            direction=direction,
             as_draft=True,
         )
 
