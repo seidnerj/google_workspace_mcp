@@ -84,6 +84,13 @@ def _gmail_service(sent_id="sent123", draft_id="draft123"):
     return svc
 
 
+def _people_service():
+    """Empty people service - no contact resolution."""
+    svc = Mock()
+    svc.people().searchContacts().execute.return_value = {"results": []}
+    return svc
+
+
 def _unwrap(tool):
     fn = tool.fn if hasattr(tool, "fn") else tool
     while hasattr(fn, "__wrapped__"):
@@ -130,6 +137,7 @@ async def test_send_reply_with_attachment_mime_shape_and_reply_trail():
     golden = json.loads((FIX / "golden_reply_attach.json").read_text())
     ctx = _make_thread_context()
     gmail = _gmail_service()
+    people = _people_service()
 
     with patch(
         "gmail.gmail_tools._fetch_thread_reply_context",
@@ -137,6 +145,7 @@ async def test_send_reply_with_attachment_mime_shape_and_reply_trail():
     ):
         result = await _unwrap(send_gmail_message)(
             service=gmail,
+            people_service=people,
             user_google_email="bob@example.com",
             to="alice@example.com",
             subject="Re: Original Subject",
@@ -184,8 +193,10 @@ async def test_draft_reply_with_attachment_matches_send_structure():
     and reply trail as the equivalent sent reply."""
     ctx = _make_thread_context()
     gmail_svc = _gmail_service()
+    people = _people_service()
 
     kwargs = dict(
+        people_service=people,
         user_google_email="bob@example.com",
         to="alice@example.com",
         subject="Re: Original Subject",
@@ -252,6 +263,7 @@ async def test_send_reply_with_inline_attachment_mime_shape():
     """
     ctx = _make_thread_context()
     gmail = _gmail_service()
+    people = _people_service()
 
     with patch(
         "gmail.gmail_tools._fetch_thread_reply_context",
@@ -259,6 +271,7 @@ async def test_send_reply_with_inline_attachment_mime_shape():
     ):
         await _unwrap(send_gmail_message)(
             service=gmail,
+            people_service=people,
             user_google_email="bob@example.com",
             to="alice@example.com",
             subject="Re: Original Subject",
@@ -302,6 +315,7 @@ async def test_send_reply_inline_and_regular_attachment():
     ctx = _make_thread_context()
     golden = json.loads((FIX / "golden_inline.json").read_text())
     gmail = _gmail_service()
+    people = _people_service()
 
     with patch(
         "gmail.gmail_tools._fetch_thread_reply_context",
@@ -309,6 +323,7 @@ async def test_send_reply_inline_and_regular_attachment():
     ):
         await _unwrap(send_gmail_message)(
             service=gmail,
+            people_service=people,
             user_google_email="bob@example.com",
             to="alice@example.com",
             subject="Re: Original Subject",
@@ -358,6 +373,7 @@ async def test_send_reply_raises_when_all_attachments_error():
     """UserInputError must be raised when all resolved attachments have errors."""
     ctx = _make_thread_context()
     gmail = _gmail_service()
+    people = _people_service()
 
     with patch(
         "gmail.gmail_tools._fetch_thread_reply_context",
@@ -366,6 +382,7 @@ async def test_send_reply_raises_when_all_attachments_error():
         with pytest.raises(UserInputError, match="No valid attachments were added"):
             await _unwrap(send_gmail_message)(
                 service=gmail,
+                people_service=people,
                 user_google_email="bob@example.com",
                 to="alice@example.com",
                 subject="Re: Original Subject",
@@ -495,9 +512,11 @@ async def test_send_non_reply_with_attachment_no_quote_trail():
     top-level MIME structure must be multipart/mixed.
     """
     gmail = _gmail_service()
+    people = _people_service()
 
     result = await _unwrap(send_gmail_message)(
         service=gmail,
+        people_service=people,
         user_google_email="bob@example.com",
         to="carol@example.com",
         subject="Hello",
@@ -533,10 +552,12 @@ async def test_draft_raises_when_all_attachments_error():
     in the draft path (mirrors test_send_reply_raises_when_all_attachments_error).
     """
     gmail = _gmail_service()
+    people = _people_service()
 
     with pytest.raises(UserInputError, match="No valid attachments were added"):
         await _unwrap(draft_gmail_message)(
             service=gmail,
+            people_service=people,
             user_google_email="bob@example.com",
             to="alice@example.com",
             subject="Broken draft",
@@ -581,10 +602,12 @@ async def test_send_missing_filename_gives_nonempty_details():
     Details section (proving fix #1: the silent-skip path now records errors).
     """
     gmail = _gmail_service()
+    people = _people_service()
 
     with pytest.raises(UserInputError) as exc_info:
         await _unwrap(send_gmail_message)(
             service=gmail,
+            people_service=people,
             user_google_email="bob@example.com",
             to="alice@example.com",
             subject="Missing filename test",
