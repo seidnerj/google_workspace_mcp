@@ -2833,7 +2833,7 @@ async def send_gmail_message(
             user_google_email=user_google_email,
         )
 
-    if body is None or (subject is None and not thread_id):
+    if body is None or (not thread_id and not (subject or "").strip()):
         raise UserInputError(
             "'body' is required, and 'subject' is required unless replying with "
             "thread_id (it is then inherited from the parent message) or "
@@ -3155,16 +3155,16 @@ async def _forward_gmail_message_impl(
 async def draft_gmail_message(
     service,
     user_google_email: str,
-    body: Annotated[
-        Optional[str],
-        Field(
-            description="Email body. Required unless forwarding, where it becomes an optional note prepended above the quoted original.",
-        ),
-    ] = None,
     subject: Annotated[
         Optional[str],
         Field(
             description="Email subject. Required for a new draft. Optional when replying with thread_id (inherits the parent message's subject, adding 'Re:' only if absent) or when forwarding (then defaults to 'Fwd: <original subject>').",
+        ),
+    ] = None,
+    body: Annotated[
+        Optional[str],
+        Field(
+            description="Email body. Required unless forwarding, where it becomes an optional note prepended above the quoted original.",
         ),
     ] = None,
     body_format: Annotated[
@@ -3267,11 +3267,11 @@ async def draft_gmail_message(
 
     Args:
         user_google_email (str): The user's Google email address. Required for authentication.
-        body (Optional[str]): Email body. Required unless forwarding (then an optional prepended note).
         subject (Optional[str]): Email subject. Required for a new draft. Optional when
             replying with thread_id: a blank subject inherits the parent message's
             subject, and the call fails if the parent has none. Optional when forwarding
             (then defaults to 'Fwd: <original subject>').
+        body (Optional[str]): Email body. Required unless forwarding (then an optional prepended note).
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the draft is a forward of that message.
         include_forwarded_attachments (bool): Whether to carry over the original attachments when forwarding. Defaults to True.

@@ -313,3 +313,45 @@ async def test_draft_new_message_still_requires_subject():
             include_signature=False,
         )
     service.users().drafts().create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject", ["", "   "])
+async def test_send_new_message_rejects_blank_subject(subject):
+    service = _service_with_parent("unused")
+
+    with pytest.raises(UserInputError, match="subject"):
+        await _unwrap(send_gmail_message)(
+            service=service,
+            user_google_email="you@example.org",
+            to="ada@example.com",
+            subject=subject,
+            body="Hello",
+            include_signature=False,
+        )
+    service.users().messages().send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subject", ["", "   "])
+async def test_draft_new_message_rejects_blank_subject(subject):
+    service = _service_with_parent("unused")
+
+    with pytest.raises(UserInputError, match="subject"):
+        await _unwrap(draft_gmail_message)(
+            service=service,
+            user_google_email="you@example.org",
+            to="ada@example.com",
+            subject=subject,
+            body="Hello",
+            include_signature=False,
+        )
+    service.users().drafts().create.assert_not_called()
+
+
+def test_draft_gmail_message_keeps_subject_before_body():
+    # Positional callers rely on upstream's (subject, body) order.
+    import inspect
+
+    params = list(inspect.signature(_unwrap(draft_gmail_message)).parameters)
+    assert params.index("subject") < params.index("body")
