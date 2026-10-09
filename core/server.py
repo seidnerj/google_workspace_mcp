@@ -176,8 +176,8 @@ def _is_same_origin_as_host(origin: str, host_header: Optional[str]) -> bool:
     parsed = urlparse(origin)
     if not parsed.hostname:
         return False
-    host = urlparse(f"//{host_header}")
     try:
+        host = urlparse(f"//{host_header}")
         origin_port = parsed.port or _DEFAULT_PORTS.get(parsed.scheme)
         host_port = host.port or _DEFAULT_PORTS.get(parsed.scheme)
     except ValueError:
@@ -202,13 +202,13 @@ def _is_rebound_same_origin_fetch(headers: dict, host_header: Optional[str]) -> 
         return False
     if not host_header or is_oauth21_enabled():
         return False
-    host = urlparse(f"//{host_header}")
-    if host.hostname in _LOOPBACK_HOSTS:
-        return False
     try:
+        host = urlparse(f"//{host_header}")
         host_port = host.port
     except ValueError:
         return True
+    if host.hostname in _LOOPBACK_HOSTS:
+        return False
     for origin in _get_allowed_http_origins():
         parsed = urlparse(origin)
         default_port = _DEFAULT_PORTS.get(parsed.scheme)

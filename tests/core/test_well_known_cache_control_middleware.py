@@ -305,6 +305,23 @@ def test_origin_validation_rejects_configured_host_on_other_port(monkeypatch):
         assert response.status_code == 403, host
 
 
+def test_origin_validation_rejects_malformed_host(monkeypatch):
+    # A Host that urlparse cannot parse (an unclosed IPv6 bracket) is untrusted
+    # and must yield 403, not an unhandled ValueError and a 500.
+    from core.server import _is_rebound_same_origin_fetch, _is_same_origin_as_host
+
+    monkeypatch.setattr("core.server.is_oauth21_enabled", lambda: True)
+    assert _is_same_origin_as_host("http://[::1]:8000", "[bad") is False
+
+    client = _origin_check_client(monkeypatch)
+    assert _is_rebound_same_origin_fetch({b"sec-fetch-site": b"same-origin"}, "[bad")
+    response = client.get(
+        "/attachments/abc",
+        headers={"Host": "[bad", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert response.status_code == 403
+
+
 def test_origin_validation_leaves_non_browser_and_navigation_requests_alone(
     monkeypatch,
 ):
