@@ -35,6 +35,7 @@ from core.file_limits import (
     ensure_within_file_size_limit,
     get_stateless_inline_max_bytes,
 )
+from core.gcs_attachment_storage import gcs_files_enabled
 from core.utils import (
     GOOGLE_API_WRITE_RETRIES,
     IMAGE_MIME_TYPES,
@@ -560,7 +561,12 @@ async def get_drive_file_download_url(
 
     # Stateless mode has no attachment storage to hand out a URL from, so the
     # file itself goes back as an embedded resource, up to inline_max_bytes.
-    inline_max_bytes = get_stateless_inline_max_bytes() if is_stateless_mode() else None
+    # GCS staging supplies that storage, so the file goes there instead.
+    inline_max_bytes = (
+        get_stateless_inline_max_bytes()
+        if is_stateless_mode() and not gcs_files_enabled()
+        else None
+    )
     if inline_max_bytes == 0:
         return _stateless_inline_disabled_message(file_name, file_id, output_mime_type)
     # Drive's declared size is the download size only for binary files; an
@@ -651,7 +657,7 @@ async def get_drive_file_download_url(
                 "\nThe file has been saved to disk and can be accessed directly via the file path."
             )
         else:
-            download_url = get_attachment_url(result.file_id)
+            download_url = await asyncio.to_thread(get_attachment_url, result.file_id)
             result_lines.append(f"\n📎 Download URL: {download_url}")
             result_lines.append("\nThe file will expire after 1 hour.")
 
