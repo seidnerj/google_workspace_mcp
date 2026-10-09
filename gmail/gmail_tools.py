@@ -87,6 +87,7 @@ from gmail.gmail_helpers import (
     _get_send_as_identity_and_signature,
     _http_error_status,
     _is_email_reaction,
+    _new_attachment_id,
     _retryable_result_ids,
     _signature_html_to_text,
     _wrap_signature_html,
@@ -2157,11 +2158,14 @@ def _prepare_gmail_message(
             if "/" in ap["mime_type"]
             else ("application", "octet-stream")
         )
+        attachment_id = _new_attachment_id()
         message.add_attachment(
             ap["data"],
             maintype=main_type,
             subtype=sub_type,
             filename=ap["filename"],
+            cid=f"<{attachment_id}>",
+            headers=[f"X-Attachment-Id: {attachment_id}"],
         )
 
     # Encode message
