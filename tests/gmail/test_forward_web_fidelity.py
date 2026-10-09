@@ -15,7 +15,7 @@ from unittest.mock import Mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 
-from gmail.gmail_tools import _forward_gmail_message_impl
+from gmail.gmail_tools import _forward_gmail_message_impl, _prepare_gmail_message_web
 from tools.golden_skeleton import extract_skeleton
 
 
@@ -114,6 +114,90 @@ async def test_forward_no_attachment_mime_shape():
 
 
 @pytest.mark.asyncio
+async def test_forward_with_attachment_mime_shape():
+    """With-attachment forward → multipart/mixed → [alternative] + attachment part."""
+    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    att_raw = b"%PDF-1.4 fake content"
+    att_b64 = base64.urlsafe_b64encode(att_raw).decode()
+
+    msg = _create_mock_message(
+        text_body="See attached document.",
+        html_body="<div>See attached document.</div>",
+        attachments=[
+            {
+                "filename": "report.pdf",
+                "mimeType": "application/pdf",
+                "attachmentId": "att1",
+            }
+        ],
+    )
+    svc = _create_mock_service(msg, attachments_data=[{"data": att_b64}])
+
+    await _forward_gmail_message_impl(
+        service=svc,
+        message_id="msg2",
+        to="recipient@example.com",
+        include_attachments=True,
+        user_google_email="me@example.com",
+    )
+
+    sk = _skeleton(_decode_sent_raw(svc))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == golden["mime_shape"]["content_type"]
+    assert top["content_type"] == "multipart/mixed"
+
+    alt = top["parts"][0]
+    assert alt["content_type"] == golden["mime_shape"]["parts"][0]["content_type"]
+    assert alt["content_type"] == "multipart/alternative"
+    assert alt["parts"][0]["content_type"] == "text/plain"
+    assert alt["parts"][1]["content_type"] == "text/html"
+
+    attach = top["parts"][1]
+    assert attach["content_type"] == golden["mime_shape"]["parts"][1]["content_type"]
+    assert attach["disposition"] == golden["mime_shape"]["parts"][1]["disposition"]
+    assert attach["disposition"] == "attachment"
+
+
+@pytest.mark.asyncio
+async def test_forward_refuses_to_send_when_builder_drops_an_attachment(monkeypatch):
+    """A downloaded attachment the MIME builder could not include must fail the
+    forward instead of sending an incomplete message reported as complete."""
+    import gmail.gmail_tools as gt
+    from core.utils import UserInputError
+
+    att_b64 = base64.urlsafe_b64encode(b"%PDF-1.4 fake content").decode()
+    msg = _create_mock_message(
+        text_body="See attached.",
+        attachments=[
+            {
+                "filename": "report.pdf",
+                "mimeType": "application/pdf",
+                "attachmentId": "att1",
+            }
+        ],
+    )
+    svc = _create_mock_service(msg, attachments_data=[{"data": att_b64}])
+    real_prepare = gt._prepare_gmail_message_web
+
+    def dropping_prepare(**kwargs):
+        raw, _count, _errors = real_prepare(**kwargs)
+        return raw, 0, ["report.pdf: boom"]
+
+    monkeypatch.setattr(gt, "_prepare_gmail_message_web", dropping_prepare)
+
+    with pytest.raises(UserInputError, match="0/1 attached.*report.pdf: boom"):
+        await _forward_gmail_message_impl(
+            service=svc,
+            message_id="msg_drop",
+            to="recipient@example.com",
+            include_attachments=True,
+            user_google_email="me@example.com",
+        )
+    send_calls = svc.users.return_value.messages.return_value.send.call_args_list
+    assert not [c for c in send_calls if "body" in c.kwargs]
+
+
+@pytest.mark.asyncio
 async def test_forward_html_probes_no_attachment():
     """HTML part must pass all golden forward html probes (no attachment)."""
     golden = json.loads((FIX / "golden_forward.json").read_text())
@@ -153,6 +237,53 @@ async def test_forward_html_probes_no_attachment():
     assert probes["has_gmail_sendername"] is True
     assert probes["has_blockquote_gmail_quote"] is False
     assert probes["has_forwarded_literal"] is True
+
+
+@pytest.mark.asyncio
+async def test_forward_html_probes_with_attachment():
+    """HTML probes must match golden_forward_attach fixture when attachments present."""
+    golden = json.loads((FIX / "golden_forward_attach.json").read_text())
+    att_raw = b"binary content"
+    att_b64 = base64.urlsafe_b64encode(att_raw).decode()
+
+    msg = _create_mock_message(
+        text_body="Body text.",
+        html_body="<div>Body HTML.</div>",
+        attachments=[
+            {
+                "filename": "file.pdf",
+                "mimeType": "application/pdf",
+                "attachmentId": "att1",
+            }
+        ],
+    )
+    svc = _create_mock_service(msg, attachments_data=[{"data": att_b64}])
+
+    await _forward_gmail_message_impl(
+        service=svc,
+        message_id="msg4",
+        to="recipient@example.com",
+        include_attachments=True,
+        user_google_email="me@example.com",
+    )
+
+    sk = _skeleton(_decode_sent_raw(svc))
+    probes = sk["html_probes"]
+    assert (
+        probes["has_gmail_quote_container"]
+        == golden["html_probes"]["has_gmail_quote_container"]
+    )
+    assert (
+        probes["has_gmail_sendername"] == golden["html_probes"]["has_gmail_sendername"]
+    )
+    assert (
+        probes["has_blockquote_gmail_quote"]
+        == golden["html_probes"]["has_blockquote_gmail_quote"]
+    )
+    assert (
+        probes["has_forwarded_literal"]
+        == golden["html_probes"]["has_forwarded_literal"]
+    )
 
 
 @pytest.mark.asyncio
@@ -286,6 +417,69 @@ async def test_forward_attachment_download_failure_raises():
             include_attachments=True,
             user_google_email="me@example.com",
         )
+
+
+def test_prepare_web_no_attachments_param_absent_vs_none_same_structure():
+    """Calling _prepare_gmail_message_web without attachments= and with
+    attachments=None must both produce multipart/alternative (same structure)."""
+    result_default, *_ = _prepare_gmail_message_web(
+        subject="Test",
+        plain_body="plain",
+        html_body="<div>html</div>",
+        to="r@example.com",
+        from_email="s@example.com",
+    )
+    result_none, *_ = _prepare_gmail_message_web(
+        subject="Test",
+        plain_body="plain",
+        html_body="<div>html</div>",
+        to="r@example.com",
+        from_email="s@example.com",
+        attachments=None,
+    )
+    sk_default = _skeleton(base64.urlsafe_b64decode(result_default))
+    sk_none = _skeleton(base64.urlsafe_b64decode(result_none))
+    assert sk_default["mime_tree"][0]["content_type"] == "multipart/alternative"
+    assert sk_none["mime_tree"][0]["content_type"] == "multipart/alternative"
+    # Both should have the same structural child types
+    assert [p["content_type"] for p in sk_default["mime_tree"][0]["parts"]] == [
+        p["content_type"] for p in sk_none["mime_tree"][0]["parts"]
+    ]
+
+
+def test_prepare_web_no_attachments_produces_alternative():
+    """_prepare_gmail_message_web with no attachments → multipart/alternative."""
+    raw_b64, *_ = _prepare_gmail_message_web(
+        subject="Subj",
+        plain_body="plain",
+        html_body="<div>html</div>",
+        to="r@example.com",
+        from_email="s@example.com",
+    )
+    sk = _skeleton(base64.urlsafe_b64decode(raw_b64))
+    assert sk["mime_tree"][0]["content_type"] == "multipart/alternative"
+
+
+def test_prepare_web_with_attachments_produces_mixed():
+    """_prepare_gmail_message_web with attachments → multipart/mixed."""
+    raw_b64, count, errors = _prepare_gmail_message_web(
+        subject="Fwd: doc",
+        plain_body="plain",
+        html_body="<div>html</div>",
+        to="r@example.com",
+        from_email="s@example.com",
+        attachments=[
+            {"filename": "a.pdf", "mime_type": "application/pdf", "data": b"%PDF-1.4"}
+        ],
+    )
+    assert count == 1
+    assert errors == []
+    sk = _skeleton(base64.urlsafe_b64decode(raw_b64))
+    top = sk["mime_tree"][0]
+    assert top["content_type"] == "multipart/mixed"
+    assert top["parts"][0]["content_type"] == "multipart/alternative"
+    assert top["parts"][1]["content_type"] == "application/pdf"
+    assert top["parts"][1]["disposition"] == "attachment"
 
 
 @pytest.mark.asyncio
