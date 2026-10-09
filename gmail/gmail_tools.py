@@ -14,7 +14,7 @@ import mimetypes
 import html
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Optional, List, Dict, Literal, Any, Union
+from typing import Annotated, Optional, List, Dict, Literal, Any, Tuple, Union
 from urllib.parse import unquote, urlparse, urlunsplit
 
 from email.header import Header
@@ -107,6 +107,8 @@ from gmail.gmail_web_mime import (
     build_quote_plain,
     encode_raw,
     format_address_list,
+    join_address_groups,
+    parse_address_list,
     format_attribution_html,
     format_attribution_plain,
     format_display_address,
@@ -1144,28 +1146,33 @@ async def _format_address_list_with_names(
     if not header_value or not header_value.strip():
         return None
 
-    formatted: List[str] = []
-    for existing_name, addr in getaddresses([header_value]):
-        if not addr:
-            continue
-        name = existing_name.strip() if existing_name else None
-        if not name:
-            name = await _lookup_display_name(
-                people_service,
-                addr,
-                cache,
-                thread_names=thread_names,
-                missing_scopes=missing_scopes,
-            )
-        formatted.append(format_display_address(name, addr))
-    if not formatted:
-        # A non-empty header that yields no address (e.g. "a@x.com; b@y.com")
-        # would otherwise drop the header silently and send without it.
+    # Parse with the strict header parser, not getaddresses: before Python
+    # 3.10.15 getaddresses splits "a@x.com; b@y.com" into addresses, so a
+    # malformed list would be sent instead of rejected.
+    try:
+        groups = parse_address_list(header_value)
+    except ValueError:
         raise UserInputError(
             f"Could not parse any email address from {header_value!r}. "
             "Separate recipients with commas."
-        )
-    return ", ".join(formatted)
+        ) from None
+
+    formatted_groups: List[Tuple[Optional[str], List[str]]] = []
+    for group_name, members in groups:
+        formatted: List[str] = []
+        for existing_name, addr in members:
+            name = existing_name.strip() if existing_name else None
+            if not name:
+                name = await _lookup_display_name(
+                    people_service,
+                    addr,
+                    cache,
+                    thread_names=thread_names,
+                    missing_scopes=missing_scopes,
+                )
+            formatted.append(format_display_address(name, addr))
+        formatted_groups.append((group_name, formatted))
+    return join_address_groups(formatted_groups)
 
 
 def _build_name_fallback_note(
