@@ -2053,14 +2053,72 @@ async def test_forward_draft_selects_send_as_identity(from_email):
         user_google_email="primary@example.com",
         forward_message_id="original",
         from_email=from_email,
+        include_signature=False,
     )
 
     raw = service.users().drafts().create.call_args.kwargs["body"]["message"]["raw"]
     drafted = _parse_raw_message(raw)
-    assert drafted["From"] == (from_email or "default.alias@example.com")
+    assert drafted["From"].addresses[0].addr_spec == (
+        from_email or "default.alias@example.com"
+    )
     assert "signature" not in drafted.get_body().get_content()
     if from_email:
         service.users().settings().sendAs().list.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", [draft_gmail_message, send_gmail_message])
+@pytest.mark.parametrize(
+    ("from_name", "expected_from"),
+    [
+        (None, "Example User <user@example.com>"),
+        ("Custom Name", "Custom Name <user@example.com>"),
+    ],
+)
+async def test_forward_uses_send_as_display_name(tool, from_name, expected_from):
+    """Forwards get the same Send-As displayName fallback as regular sends and
+    drafts; an explicit from_name still wins."""
+    service = _mock_gmail_service()
+    service.users().messages().get().execute.return_value = _thread_message(
+        "original", text="Original body"
+    )
+
+    await _unwrap(tool)(
+        service=service,
+        user_google_email="user@example.com",
+        to="recipient@example.com",
+        forward_message_id="original",
+        from_name=from_name,
+    )
+
+    if tool is draft_gmail_message:
+        raw = service.users().drafts().create.call_args.kwargs["body"]["message"]["raw"]
+    else:
+        raw = service.users().messages().send.call_args.kwargs["body"]["raw"]
+    assert str(_parse_raw_message(raw)["From"]) == expected_from
+
+
+@pytest.mark.asyncio
+async def test_send_forward_without_signature_skips_send_as_lookup():
+    """With signatures disabled the send-forward path never touches the
+    settings endpoint, matching the regular send path; From stays bare."""
+    service = _mock_gmail_service()
+    service.users().messages().get().execute.return_value = _thread_message(
+        "original", text="Original body"
+    )
+    service.users().settings().sendAs().list.reset_mock()
+
+    await _unwrap(send_gmail_message)(
+        service=service,
+        user_google_email="user@example.com",
+        to="recipient@example.com",
+        forward_message_id="original",
+        include_signature=False,
+    )
+
+    raw = service.users().messages().send.call_args.kwargs["body"]["raw"]
+    assert str(_parse_raw_message(raw)["From"]) == "user@example.com"
+    service.users().settings().sendAs().list.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2292,6 +2350,7 @@ async def test_draft_gmail_message_forward_honors_direction(monkeypatch):
         body="FYI",
         from_email="user@example.com",
         direction="rtl",
+        include_signature=False,
     )
 
     assert captured["direction"] == "rtl"
