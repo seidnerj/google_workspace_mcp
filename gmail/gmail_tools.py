@@ -79,6 +79,7 @@ from gmail.gmail_helpers import (
     _get_send_as_identity_and_signature,
     _http_error_status,
     _is_email_reaction,
+    _new_attachment_id,
     _retryable_result_ids,
     _signature_html_to_text,
     _wrap_signature_html,
@@ -1723,11 +1724,14 @@ def _prepare_gmail_message(
                     f"filename_len={len(safe_filename)} ({len(file_data)} bytes)"
                 )
             else:
+                attachment_id = _new_attachment_id()
                 message.add_attachment(
                     file_data,
                     maintype=main_type,
                     subtype=sub_type,
                     filename=safe_filename,
+                    cid=f"<{attachment_id}>",
+                    headers=[f"X-Attachment-Id: {attachment_id}"],
                 )
                 logger.info(
                     f"Attached file: filename_len={len(safe_filename)} "
