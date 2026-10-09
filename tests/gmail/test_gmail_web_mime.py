@@ -877,3 +877,63 @@ class TestReplyQuoteParentFidelity:
         assert "> First paragraph.\n" in plain
         assert "> Second paragraph." in plain
         assert "First paragraph. Second" not in plain
+
+
+class TestFormatAddressListParsing:
+    """format_address_list must never emit empty entries or flatten groups."""
+
+    def _decoded(self, value: str) -> str:
+        from email.header import decode_header, make_header
+
+        from gmail.gmail_web_mime import format_address_list
+
+        out = format_address_list(value)
+        assert out.isascii(), out
+        return str(make_header(decode_header(out)))
+
+    def test_trailing_comma_keeps_the_recipient(self):
+        assert self._decoded("José <jose@example.com>,") == "José <jose@example.com>"
+
+    def test_empty_list_element_is_dropped_without_dangling_separator(self):
+        assert (
+            self._decoded("José <jose@example.com>,, ada@example.com")
+            == "José <jose@example.com>, ada@example.com"
+        )
+
+    def test_group_syntax_is_preserved(self):
+        assert (
+            self._decoded("Team: José <j@example.com>, a@example.com;, o@example.com")
+            == "Team: José <j@example.com>, a@example.com;, o@example.com"
+        )
+
+    def test_non_ascii_group_name_is_encoded(self):
+        from email.header import decode_header, make_header
+
+        from gmail.gmail_web_mime import format_address_list
+
+        out = format_address_list("Équipe: a@example.com;, José <j@example.com>")
+        assert out.isascii(), out
+        group, rest = out.split(": a@example.com;, ", 1)
+        assert str(make_header(decode_header(group))) == "Équipe"
+        assert str(make_header(decode_header(rest))) == "José <j@example.com>"
+
+    def test_malformed_entry_is_rejected_not_dropped(self):
+        import pytest
+
+        from gmail.gmail_web_mime import format_address_list
+
+        with pytest.raises(ValueError, match="Invalid address list"):
+            format_address_list("José <jose@example.com>, broken <, ada@example.com")
+
+    def test_name_without_address_is_rejected(self):
+        import pytest
+
+        from gmail.gmail_web_mime import format_address_list
+
+        with pytest.raises(ValueError, match="Invalid address list"):
+            format_address_list("José")
+
+    def test_empty_group_is_kept(self):
+        assert self._decoded("Undisclosed:;, José <j@example.com>") == (
+            "Undisclosed:;, José <j@example.com>"
+        )
