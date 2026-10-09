@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import ssl
 from collections import Counter
 from datetime import datetime, timezone
@@ -227,6 +228,11 @@ def _normalize_email(address: str) -> str:
     local, _, domain = addr.partition("@")
     local = local.split("+", 1)[0]
     return f"{local}@{domain}"
+
+
+def _new_attachment_id() -> str:
+    """Return a random attachment id in the shape Gmail web uses (``f_...``)."""
+    return f"f_{secrets.token_hex(5)}"
 
 
 def _http_error_status(error: HttpError) -> Optional[int]:
