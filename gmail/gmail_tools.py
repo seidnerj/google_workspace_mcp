@@ -20,7 +20,7 @@ from urllib.parse import unquote, urlparse, urlunsplit
 from email.header import Header
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr, getaddresses, parseaddr
+from email.utils import formataddr, getaddresses, parseaddr, parsedate_to_datetime
 
 import httpx
 from googleapiclient.errors import HttpError
@@ -106,6 +106,7 @@ from gmail.gmail_web_mime import (
     build_quote_container_html,
     build_quote_plain,
     encode_raw,
+    format_address_list,
     format_attribution_html,
     format_attribution_plain,
     format_display_address,
@@ -1474,8 +1475,7 @@ def _split_resolved_attachments(
                     logger.error("File not found: path_len=%d", len(file_path))
                     attachment_errors.append(f"{filename or file_path}: file not found")
                     continue
-                with open(path_obj, "rb") as fh:
-                    file_data = fh.read()
+                file_data = _read_attachment_bytes(path_obj)
                 if not filename:
                     filename = path_obj.name
                 if not mime_type:
@@ -1694,6 +1694,43 @@ async def _resolve_url_attachments(
     return resolved
 
 
+# A body that already opens with a ``<div dir=...>`` container; group ``dir``
+# spans the attribute value (quoted or bare).
+_LEADING_DIR_DIV_RE = re.compile(r"\s*<div dir=(?P<dir>\"[^\"]*\"|'[^']*'|[^\s>]+)")
+
+
+def _derive_web_bodies(
+    body: str,
+    body_format: Literal["plain", "html"],
+    direction: Literal["auto", "ltr", "rtl"],
+) -> tuple[str, str]:
+    """Derive the (text/plain, text/html) parts of a Gmail-web compose.
+
+    Plain text becomes Gmail's typed ``<div>`` structure inside the direction
+    container; HTML is wrapped in that container unless it already starts with
+    one, and its plain part keeps block breaks. ``"auto"`` detects the base
+    direction from the body text.
+    """
+    if body_format == "html":
+        resolved_dir = (
+            base_text_direction(_html_to_text(body))
+            if direction == "auto"
+            else direction
+        )
+        wrapper = _LEADING_DIR_DIV_RE.match(body)
+        if wrapper is None:
+            html_part = new_message_html(body, resolved_dir)
+        elif direction == "auto":
+            # Keep the caller's own container and its direction.
+            html_part = body
+        else:
+            # An explicit direction wins over the caller's container.
+            html_part = f'{body[: wrapper.start("dir")]}"{direction}"{body[wrapper.end("dir") :]}'
+        return html_to_text_preserving_breaks(body).strip(), html_part
+    resolved_dir = base_text_direction(body) if direction == "auto" else direction
+    return body, new_message_html(plain_body_to_html(body), resolved_dir)
+
+
 async def _build_web_compose_raw(
     people_service,
     *,
@@ -1750,22 +1787,7 @@ async def _build_web_compose_raw(
         for header in (to, cc, bcc)
     ]
 
-    if body_format == "html":
-        resolved_dir = (
-            base_text_direction(_html_to_text(body))
-            if direction == "auto"
-            else direction
-        )
-        new_html = (
-            body
-            if body.lstrip().startswith("<div dir=")
-            else new_message_html(body, resolved_dir)
-        )
-        new_plain = html_to_text_preserving_breaks(body).strip()
-    else:
-        new_plain = body
-        resolved_dir = base_text_direction(body) if direction == "auto" else direction
-        new_html = new_message_html(plain_body_to_html(body), resolved_dir)
+    new_plain, new_html = _derive_web_bodies(body, body_format, direction)
 
     if reply_target:
         new_plain, new_html = _build_web_reply_bodies(new_plain, new_html, reply_target)
@@ -1816,13 +1838,19 @@ def _build_web_reply_bodies(
         return new_plain, new_html
     parent_name = parent_name.strip() or parent_email
 
-    _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
+    # Keep the parent's own UTC offset: the attribution shows the sender's
+    # wall-clock time, not UTC.
+    try:
+        parent_dt = parsedate_to_datetime(target.get("date") or "")
+    except (TypeError, ValueError):
+        _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
     if parent_dt is None:
         return new_plain, new_html
 
     parent_text = target.get("text_body") or ""
     if not parent_text and target.get("html_body"):
-        parent_text = _html_to_text(target["html_body"])
+        # Keep the parent's paragraph structure in the quoted plain text.
+        parent_text = html_to_text_preserving_breaks(target["html_body"]).strip()
     parent_html = target.get("html_body") or ""
     if not parent_html and parent_text:
         parent_html = "<br>".join(html.escape(line) for line in parent_text.split("\n"))
@@ -1856,8 +1884,8 @@ def _prepare_gmail_message_web(
     ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
     text/html parts (including any reply quote trail) built by the async caller.
     Returns ``(raw_b64url, attached_count, attachment_errors)``.
-    To/Cc/Bcc are expected pre-formatted; From is formatted here from
-    ``from_email`` + optional ``from_name``.
+    To/Cc/Bcc are validated, then any non-ASCII display names are RFC 2047
+    encoded; From is formatted here from ``from_email`` + optional ``from_name``.
 
     Selects the smallest sufficient MIME structure via ``assemble_web_message``:
 
@@ -1889,7 +1917,7 @@ def _prepare_gmail_message_web(
     if in_reply_to:
         headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
     if bcc and include_bcc_header:
-        headers.append(("Bcc", _safe_header("Bcc", bcc)))
+        headers.append(("Bcc", format_address_list(_safe_header("Bcc", bcc))))
     # Guard the caller-supplied subject for header injection BEFORE encoding.
     # A long non-ASCII subject RFC2047-folds into a multi-line continuation; with
     # linesep="\r\n" that is a valid RFC5322 fold, but _safe_header would reject
@@ -1909,9 +1937,9 @@ def _prepare_gmail_message_web(
             )
         )
     if to:
-        headers.append(("To", _safe_header("To", to)))
+        headers.append(("To", format_address_list(_safe_header("To", to))))
     if cc:
-        headers.append(("Cc", _safe_header("Cc", cc)))
+        headers.append(("Cc", format_address_list(_safe_header("Cc", cc))))
 
     if not attachments:
         message = assemble_alternative(
@@ -2010,24 +2038,10 @@ def _prepare_gmail_message(
         if html_body is not None:
             plain_part = body
             html_part = html_body
-        elif normalized_format == "html":
-            resolved_dir = (
-                base_text_direction(_html_to_text(body))
-                if direction == "auto"
-                else direction
-            )
-            html_part = (
-                body
-                if body.lstrip().startswith("<div dir=")
-                else new_message_html(body, resolved_dir)
-            )
-            plain_part = html_to_text_preserving_breaks(body).strip()
         else:
-            plain_part = body
-            resolved_dir = (
-                base_text_direction(body) if direction == "auto" else direction
+            plain_part, html_part = _derive_web_bodies(
+                body, normalized_format, direction
             )
-            html_part = new_message_html(plain_body_to_html(body), resolved_dir)
 
         raw_message, web_count, web_errors = _prepare_gmail_message_web(
             subject=reply_subject,
