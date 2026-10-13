@@ -50,11 +50,11 @@ from core.file_limits import (
     get_max_file_bytes,
 )
 from core.gcs_attachment_storage import gcs_files_enabled
+from core import config as core_config
 from core.config import (
     get_transport_mode,
     WORKSPACE_EXTERNAL_URL,
     WORKSPACE_MCP_BASE_URI,
-    WORKSPACE_MCP_PORT,
     is_extended_name_lookup_enabled,
 )
 from gmail.gmail_send_transport import dispatch_transmit, resolve_effective_transport
@@ -1411,7 +1411,9 @@ def _get_trusted_attachment_origins() -> set[tuple[str, str]]:
     origins: set[tuple[str, str]] = set()
     for origin in (
         WORKSPACE_EXTERNAL_URL,
-        f"{WORKSPACE_MCP_BASE_URI}:{WORKSPACE_MCP_PORT}",
+        # Attribute access re-resolves the port (PEP 562), picking up the stdio
+        # ephemeral port published after this module was imported.
+        f"{WORKSPACE_MCP_BASE_URI}:{core_config.WORKSPACE_MCP_PORT}",
     ):
         if not origin:
             continue
