@@ -9,7 +9,9 @@ client escape hatch) keeps the legacy fixed-port behavior.
 
 import socket
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
+import pytest
 from starlette.testclient import TestClient
 
 from auth import oauth_callback_server
@@ -241,3 +243,109 @@ def test_ephemeral_arms_watchdog_timer(monkeypatch):
 
     assert created["interval"] == 123
     assert callable(created["fn"])
+
+
+# --- redirect URI / port consumers see the ephemeral port ------------------
+
+
+def _arm_real_ephemeral_path(monkeypatch):
+    """Run the real stdio ephemeral path (bind, publish, reload) with the
+    listener start stubbed out. Returns a dict that receives the bound port."""
+    monkeypatch.setattr(oauth_callback_server, "get_transport_mode", lambda: "stdio")
+    monkeypatch.setattr(oauth_callback_server, "_OPERATOR_PINNED_CALLBACK_PORT", False)
+    # setenv-then-delenv records the vars as originally unset, so teardown also
+    # removes the values the ephemeral path writes into os.environ.
+    for var in ("WORKSPACE_MCP_PORT", "PORT", "WORKSPACE_MCP_RESOLVED_PORT"):
+        monkeypatch.setenv(var, "0")
+        monkeypatch.delenv(var)
+    monkeypatch.setenv("WORKSPACE_MCP_BASE_URI", "http://localhost")
+    monkeypatch.delenv("GOOGLE_OAUTH_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("WORKSPACE_EXTERNAL_URL", raising=False)
+    oauth_callback_server.reload_oauth_config()
+
+    bound = {}
+    real_acquire = oauth_callback_server._acquire_ephemeral_port
+
+    def recording_acquire(host):
+        sock, port = real_acquire(host)
+        bound["port"] = port
+        return sock, port
+
+    def fake_ensure(transport_mode, port, base_uri, prebound_socket=None, **kwargs):  # noqa: ARG001
+        if prebound_socket is not None:
+            prebound_socket.close()
+        return True, ""
+
+    monkeypatch.setattr(
+        oauth_callback_server, "_acquire_ephemeral_port", recording_acquire
+    )
+    monkeypatch.setattr(
+        oauth_callback_server, "ensure_oauth_callback_available", fake_ensure
+    )
+    return bound
+
+
+@pytest.mark.asyncio
+async def test_auth_url_redirect_uri_uses_ephemeral_port(monkeypatch):
+    """Regression: the redirect URI handed to start_auth_flow must be composed
+    after the ephemeral listener is bound, not from the stale default :8000."""
+    from auth.google_auth import (
+        GoogleAuthenticationError,
+        get_authenticated_google_service,
+    )
+
+    bound = _arm_real_ephemeral_path(monkeypatch)
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    captured = {}
+
+    async def fake_start_auth_flow(**kwargs):
+        captured["redirect_uri"] = kwargs["redirect_uri"]
+        return "auth-url"
+
+    monkeypatch.setattr("auth.google_auth.get_fastmcp_session_id", lambda: None)
+    monkeypatch.setattr("auth.google_auth.get_fastmcp_context", None)
+    monkeypatch.setattr("auth.google_auth.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("auth.google_auth.get_credentials", lambda **kwargs: None)
+    monkeypatch.setattr("auth.google_auth.start_auth_flow", fake_start_auth_flow)
+
+    with pytest.raises(GoogleAuthenticationError, match="auth-url"):
+        await get_authenticated_google_service(
+            service_name="gmail",
+            version="v1",
+            tool_name="test_tool",
+            user_google_email="user@gmail.com",
+            required_scopes=["scope.a"],
+        )
+
+    assert bound["port"] != 8000
+    assert urlparse(captured["redirect_uri"]).port == bound["port"]
+
+
+def test_attachment_url_uses_ephemeral_port(monkeypatch):
+    """Regression: the stdio attachment URL must point at the port the
+    lazily-started callback listener actually bound."""
+    from core import attachment_storage
+
+    bound = _arm_real_ephemeral_path(monkeypatch)
+    monkeypatch.setattr("core.gcs_attachment_storage.gcs_files_enabled", lambda: False)
+
+    url = attachment_storage.get_attachment_url("file-id")
+
+    assert urlparse(url).port == bound["port"]
+
+
+def test_gmail_trusted_attachment_origin_tracks_current_port(monkeypatch):
+    """Regression: the trusted local attachment origin must follow the port
+    published at auth time, not the value frozen when gmail_tools was imported."""
+    # Import before publishing the port, as happens at real server startup.
+    from gmail import gmail_tools
+
+    monkeypatch.setenv("WORKSPACE_MCP_RESOLVED_PORT", "1")
+    monkeypatch.setenv("WORKSPACE_MCP_PORT", "54321")
+
+    origins = gmail_tools._get_trusted_attachment_origins()
+
+    assert any(netloc.endswith(":54321") for _, netloc in origins)
