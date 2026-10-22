@@ -532,21 +532,25 @@ class TestForwardSmtpFallbackKeepsBcc:
         assert "SMTP scope missing" in result
 
 
-class TestPrepareGmailMessageNonWebBccGate:
-    def test_non_web_no_bcc_header_when_include_bcc_header_false(self):
-        """web_compose=False + include_bcc_header=False must NOT add Bcc header."""
-        from gmail.gmail_tools import _prepare_gmail_message
+class TestWebBuilderBccGate:
+    """The web builder omits Bcc only when the SMTP transport asks it to."""
 
-        raw_b64, _thread, _count, _errors = _prepare_gmail_message(
-            subject="Bcc gate test",
-            body="Body text",
-            to="carol@example.com",
-            bcc="dave@example.com",
-            web_compose=False,
-            include_bcc_header=False,
+    def _raw(self, include_bcc_header):
+        from gmail.gmail_helpers import _prepare_gmail_message_web
+
+        raw_b64 = _prepare_gmail_message_web(
+            subject="s",
+            plain_body="p",
+            html_body="<div>p</div>",
+            to="to@example.com",
+            bcc="hidden@example.com",
+            from_email="me@example.com",
+            include_bcc_header=include_bcc_header,
         )
-        raw = base64.urlsafe_b64decode(raw_b64)
-        msg = message_from_bytes(raw)
-        assert msg["Bcc"] is None, (
-            f"Bcc header must be absent when include_bcc_header=False; got: {msg['Bcc']}"
-        )
+        return base64.urlsafe_b64decode(raw_b64).decode()
+
+    def test_bcc_header_kept_for_api(self):
+        assert "Bcc: hidden@example.com" in self._raw(True)
+
+    def test_bcc_header_omitted_for_smtp(self):
+        assert "hidden@example.com" not in self._raw(False)

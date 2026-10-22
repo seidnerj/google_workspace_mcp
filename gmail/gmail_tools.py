@@ -11,16 +11,14 @@ import binascii
 import json
 import re
 import mimetypes
-import html
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Optional, List, Dict, Literal, Any, Tuple, Union
 from urllib.parse import unquote, urlparse, urlunsplit
 
-from email.header import Header
 from email.message import EmailMessage
 from email.policy import SMTP
-from email.utils import formataddr, getaddresses, parseaddr, parsedate_to_datetime
+from email.utils import formataddr, getaddresses
 
 import httpx
 from googleapiclient.errors import HttpError
@@ -85,44 +83,38 @@ from gmail.gmail_helpers import (
     RAW_BODY_TRUNCATE_LIMIT,
     THREAD_REPLY_CONTEXT_FIELDS,
     _analyze_thread_ownership_impl,
+    _build_forward_content,
+    _build_web_compose_raw,
     _derive_reply_all_recipients,
     _derive_reply_headers,
     _fetch_with_retry,
-    _parse_date_header,
+    _format_id_list,
     _get_send_as_identity_and_signature,
     _http_error_status,
+    _inherit_reply_subject,
     _is_email_reaction,
+    _prepare_gmail_message_web,
+    _reject_entity_escaped_html_body,
+    _reply_subject,
     _is_quota_or_rate_limit_error,
-    _new_attachment_id,
     _retryable_result_ids,
     _signature_html_to_text,
     _wrap_signature_html,
     apply_gmail_filter_to_existing,
     build_label_color,
     format_filter_apply_result,
+    format_thread_label_outcomes,
     html_newlines_to_br,
     html_to_text_preserving_breaks,
+    modify_gmail_thread_labels,
     update_gmail_filter,
 )
 from gmail.gmail_web_mime import (
-    assemble_alternative,
-    assemble_web_message,
-    base_text_direction,
-    build_forwarded_container_html,
-    build_forwarded_plain,
-    build_quote_container_html,
-    build_quote_plain,
-    encode_raw,
-    format_address_list,
+    TextDirection,
+    _new_attachment_id,
+    format_display_address,
     join_address_groups,
     parse_address_list,
-    format_attribution_html,
-    format_attribution_plain,
-    format_display_address,
-    gmail_boundary,
-    new_message_html,
-    plain_body_to_html,
-    render_forward_recipients_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +127,11 @@ GMAIL_SEARCH_HEADER_BATCH_SIZE = 10
 GMAIL_REQUEST_DELAY = 0.1
 GMAIL_RATE_LIMIT_BACKOFF = 2.0
 HTML_BODY_TRUNCATE_LIMIT = 20000
+DIRECTION_DESCRIPTION = (
+    "Base text direction of the body. 'auto' (default) takes it from the first "
+    "strong character (a right-to-left script gives 'rtl', anything else 'ltr'); "
+    "'ltr'/'rtl' force it. On a forward it orients the note."
+)
 
 # Keep ``None`` valid at runtime without publishing it as an ``anyOf`` branch.
 # Cowork needs a top-level array schema, while Moonshot rejects the previous
@@ -1447,9 +1444,8 @@ def _split_resolved_attachments(
 ) -> tuple[List[dict], List[dict], int, List[str]]:
     """Split a list of resolved attachments into inline and regular parts.
 
-    Replicates the classification logic in ``_prepare_gmail_message``'s
-    attachment loop so both the legacy EmailMessage path and the web-faithful
-    MIME path share identical behaviour.
+    Mirrors the classification in ``_prepare_gmail_message``'s attachment
+    loop for the Gmail-web path.
 
     Args:
         resolved: List of attachment dicts, each produced by
@@ -1460,7 +1456,7 @@ def _split_resolved_attachments(
     Returns:
         ``(inline_parts, attachment_parts, attached_count, attachment_errors)``
 
-        ``inline_parts`` - dicts for ``assemble_web_message``'s inline_parts
+        ``inline_parts`` - dicts for ``_prepare_gmail_message_web``'s inline_parts
             argument: ``{filename, mime_type, data: bytes, content_id: str}``.
         ``attachment_parts`` - dicts for the attachment_parts argument:
             ``{filename, mime_type, data: bytes}``.
@@ -1739,96 +1735,31 @@ async def _resolve_url_attachments(
     return resolved
 
 
-# A body that already opens with a ``<div ... dir=...>`` container; group
-# ``dir`` spans the attribute value (quoted or bare). Attributes before ``dir``
-# are consumed whole (name plus quoted or bare value), so ``dir=`` text inside
-# another attribute's quoted value is never mistaken for the attribute itself.
-_HTML_ATTR_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+)"
-_LEADING_DIR_DIV_RE = re.compile(
-    r"\s*<div"
-    rf"(?:\s+(?!dir\s*=)[^\s\"'>/=]+(?:\s*=\s*{_HTML_ATTR_VALUE})?)*"
-    rf"\s+dir\s*=\s*(?P<dir>{_HTML_ATTR_VALUE})",
-    re.IGNORECASE,
-)
-
-
-def _derive_web_bodies(
-    body: str,
-    body_format: Literal["plain", "html"],
-    direction: Literal["auto", "ltr", "rtl"],
-) -> tuple[str, str]:
-    """Derive the (text/plain, text/html) parts of a Gmail-web compose.
-
-    Plain text becomes Gmail's typed ``<div>`` structure inside the direction
-    container; HTML is wrapped in that container unless it already starts with
-    one, and its plain part keeps block breaks. ``"auto"`` detects the base
-    direction from the body text.
-    """
-    if body_format == "html":
-        resolved_dir = (
-            base_text_direction(_html_to_text(body))
-            if direction == "auto"
-            else direction
-        )
-        wrapper = _LEADING_DIR_DIV_RE.match(body)
-        if wrapper is None:
-            html_part = new_message_html(body, resolved_dir)
-        elif direction == "auto":
-            # Keep the caller's own container and its direction.
-            html_part = body
-        else:
-            # An explicit direction wins over the caller's container.
-            html_part = f'{body[: wrapper.start("dir")]}"{direction}"{body[wrapper.end("dir") :]}'
-        return html_to_text_preserving_breaks(body).strip(), html_part
-    resolved_dir = base_text_direction(body) if direction == "auto" else direction
-    return body, new_message_html(plain_body_to_html(body), resolved_dir)
-
-
-async def _build_web_compose_raw(
+async def _resolve_web_recipient_names(
     people_service,
     *,
-    subject: str,
-    body: str,
-    body_format: Literal["plain", "html"],
     to: Optional[str],
     cc: Optional[str],
     bcc: Optional[str],
     from_email: str,
-    from_name: Optional[str],
-    in_reply_to: Optional[str],
-    references: Optional[str],
-    direction: Literal["auto", "ltr", "rtl"],
-    reply_target: Optional[Dict[str, Any]],
-    attachments: Optional[List[Dict[str, Any]]],
     thread_names: Optional[Dict[str, str]],
-    include_bcc_header: bool,
-) -> tuple[str, int, List[str], bool, set]:
-    """Assemble a Gmail-web faithful raw message for the send/draft tools.
+) -> tuple[Optional[str], Optional[str], Optional[str], bool, set]:
+    """Fill recipient display names the way Gmail web does, best-effort.
 
-    Builds both body parts from ``body`` (Gmail's typed ``<div>`` structure for
-    plain text, the ltr container for HTML) and delegates the deterministic MIME
-    assembly to ``_prepare_gmail_message``'s web path. The reply ``Re:`` subject
-    prefix is applied there, exactly as on the legacy path. ``direction`` is the
-    base text direction; ``"auto"`` detects it from the body text. When
-    ``reply_target`` (the parent message from the thread reply context, with
-    bodies) is given, Gmail's ``gmail_quote`` reply trail is appended to both
-    parts. ``attachments`` (resolved entries) are carried by the web assembler.
+    Saved contacts first, then ``thread_names`` (sender-supplied names harvested
+    from the conversation), then, when enabled, Other contacts and the
+    directory. Addresses that already carry a name keep it; unresolved ones
+    stay bare.
 
-    Recipient display names are resolved best-effort the way Gmail does: saved
-    contacts, then ``thread_names`` (sender-supplied names harvested from the
-    conversation), then, when enabled, Other contacts and the directory.
-    Addresses that already carry a name keep it; unresolved ones stay bare.
-
-    Returns ``(raw_message, attached_count, attachment_errors, had_unresolved,
-    missing_scopes)``. ``had_unresolved`` is True when a looked-up recipient got
-    no name; ``missing_scopes`` holds name-resolution scopes that returned a
-    scope error. Together they drive the caller's scope-fallback note.
+    Returns ``(to, cc, bcc, had_unresolved, missing_scopes)``. ``had_unresolved``
+    is True when a looked-up recipient got no name; ``missing_scopes`` holds
+    name-resolution scopes that returned a scope error. Together they drive the
+    caller's scope-fallback note.
     """
     name_cache: Dict[str, Optional[str]] = {}
     missing_scopes: set = set()
     if people_service is not None:
         await _warmup_people_cache(people_service)
-    # The sender's name is NOT contacts-resolved: it comes from Send-As only.
     to, cc, bcc = [
         await _format_address_list_with_names(
             people_service,
@@ -1839,189 +1770,13 @@ async def _build_web_compose_raw(
         )
         for header in (to, cc, bcc)
     ]
-
-    new_plain, new_html = _derive_web_bodies(body, body_format, direction)
-
-    if reply_target:
-        new_plain, new_html = _build_web_reply_bodies(new_plain, new_html, reply_target)
-
-    raw_message, _thread, attached_count, attachment_errors = _prepare_gmail_message(
-        subject=subject,
-        body=new_plain,
-        html_body=new_html,
-        to=to,
-        cc=cc,
-        bcc=bcc,
-        in_reply_to=in_reply_to,
-        references=references,
-        from_email=from_email,
-        from_name=from_name,
-        web_compose=True,
-        attachments=attachments,
-        include_bcc_header=include_bcc_header,
-    )
-    # A RECIPIENT is "unresolved" if we looked it up (no inline name) and got
-    # nothing from contacts or the thread. The sender is excluded: its name
-    # comes from Send-As, so its absence must not trigger a contacts note.
+    # The sender's name comes from Send-As, never contacts, so its absence must
+    # not trigger a contacts note.
     sender_key = from_email.strip().lower()
     had_unresolved = any(
         value is None for key, value in name_cache.items() if key != sender_key
     )
-    return (
-        raw_message,
-        attached_count,
-        attachment_errors,
-        had_unresolved,
-        missing_scopes,
-    )
-
-
-def _build_web_reply_bodies(
-    new_plain: str, new_html: str, target: Dict[str, Any]
-) -> tuple[str, str]:
-    """Append a Gmail-web ``gmail_quote`` reply trail to both body parts.
-
-    ``target`` is the parent message from the thread reply context (its From,
-    Date and plain + html bodies). When the parent lacks a usable sender address
-    or date, the bodies are returned unchanged so the reply still sends, just
-    without a quote.
-    """
-    parent_name, parent_email = parseaddr(target.get("from") or "")
-    if not parent_email:
-        return new_plain, new_html
-    parent_name = parent_name.strip() or parent_email
-
-    # Keep the parent's own UTC offset: the attribution shows the sender's
-    # wall-clock time, not UTC.
-    try:
-        parent_dt = parsedate_to_datetime(target.get("date") or "")
-    except (TypeError, ValueError):
-        _iso, parent_dt = _parse_date_header(target.get("date", ""), None)
-    if parent_dt is None:
-        return new_plain, new_html
-
-    parent_text = target.get("text_body") or ""
-    if not parent_text and target.get("html_body"):
-        # Keep the parent's paragraph structure in the quoted plain text.
-        parent_text = html_to_text_preserving_breaks(target["html_body"]).strip()
-    parent_html = target.get("html_body") or ""
-    if not parent_html and parent_text:
-        parent_html = "<br>".join(html.escape(line) for line in parent_text.split("\n"))
-
-    attr_plain = format_attribution_plain(parent_name, parent_email, parent_dt)
-    attr_html = format_attribution_html(parent_name, parent_email, parent_dt)
-    quoted_plain = build_quote_plain(parent_text)
-    container = build_quote_container_html(attr_html, parent_html)
-
-    reply_plain = f"{new_plain}\n\n{attr_plain}\n\n{quoted_plain}"
-    reply_html = f"{new_html}<br>{container}"
-    return reply_plain, reply_html
-
-
-def _prepare_gmail_message_web(
-    subject: str,
-    plain_body: str,
-    html_body: str,
-    to: Optional[str] = None,
-    cc: Optional[str] = None,
-    bcc: Optional[str] = None,
-    in_reply_to: Optional[str] = None,
-    references: Optional[str] = None,
-    from_email: Optional[str] = None,
-    from_name: Optional[str] = None,
-    attachments: Optional[List[Dict]] = None,
-    include_bcc_header: bool = True,
-) -> tuple[str, int, List[str]]:
-    """Assemble a Gmail-web faithful message.
-
-    ``plain_body`` and ``html_body`` are the fully-assembled text/plain and
-    text/html parts (including any reply quote trail) built by the async caller.
-    Returns ``(raw_b64url, attached_count, attachment_errors)``.
-    To/Cc/Bcc are validated, then any non-ASCII display names are RFC 2047
-    encoded; From is formatted here from ``from_email`` + optional ``from_name``.
-
-    Selects the smallest sufficient MIME structure via ``assemble_web_message``:
-
-    - No attachments → ``multipart/alternative``
-    - Regular-only → ``multipart/mixed`` → [alternative, attachments...]
-    - Inline-only → ``multipart/related`` → [alternative, inline...]
-    - Both → ``multipart/mixed`` → [``multipart/related``, attachments...]
-
-    ``attachments`` is a list of resolved attachment dicts (keys:
-    ``_resolved_bytes``/``content``/``data``, ``filename``, ``mime_type``,
-    optional ``content_id``, optional ``error``).
-    """
-
-    # Reject CR/LF in any user-controlled header value before assembly: bare
-    # newlines would let a crafted subject/recipient inject extra headers
-    # (RFC5322 header injection).
-    def _safe_header(field: str, value: str) -> str:
-        if "\r" in value or "\n" in value:
-            raise ValueError(f"Invalid {field} header value: line breaks not allowed.")
-        return value
-
-    # Author headers in Gmail's order. Message-ID is intentionally NOT authored
-    # (Gmail assigns it on send/draft).
-    headers: List[tuple[str, str]] = [("MIME-Version", "1.0")]
-    if references:
-        # Fold the References chain with CRLF + TAB per RFC5322 continuation.
-        folded = "\r\n\t".join(_safe_header("References", references).split())
-        headers.append(("References", folded))
-    if in_reply_to:
-        headers.append(("In-Reply-To", _safe_header("In-Reply-To", in_reply_to)))
-    if bcc and include_bcc_header:
-        headers.append(("Bcc", format_address_list(_safe_header("Bcc", bcc))))
-    # Guard the caller-supplied subject for header injection BEFORE encoding.
-    # A long non-ASCII subject RFC2047-folds into a multi-line continuation; with
-    # linesep="\r\n" that is a valid RFC5322 fold, but _safe_header would reject
-    # its CRLF, so validate the raw input and append the encoded value directly.
-    _safe_header("Subject", subject)
-    subj_value = (
-        subject
-        if subject.isascii()
-        else Header(subject, "utf-8").encode(maxlinelen=998, linesep="\r\n")
-    )
-    headers.append(("Subject", subj_value))
-    if from_email:
-        headers.append(
-            (
-                "From",
-                _safe_header("From", format_display_address(from_name, from_email)),
-            )
-        )
-    if to:
-        headers.append(("To", format_address_list(_safe_header("To", to))))
-    if cc:
-        headers.append(("Cc", format_address_list(_safe_header("Cc", cc))))
-
-    if not attachments:
-        message = assemble_alternative(
-            headers=headers,
-            plain_text=plain_body,
-            html_text=html_body,
-            boundary=gmail_boundary(),
-        )
-        return encode_raw(message), 0, []
-
-    inline_parts, attachment_parts, attached_count, attachment_errors = (
-        _split_resolved_attachments(attachments)
-    )
-
-    boundary_alt = gmail_boundary()
-    boundary_related = gmail_boundary() if inline_parts else None
-    boundary_mixed = gmail_boundary() if attachment_parts or inline_parts else None
-
-    message = assemble_web_message(
-        headers=headers,
-        plain_text=plain_body,
-        html_text=html_body,
-        inline_parts=inline_parts or None,
-        attachment_parts=attachment_parts or None,
-        boundary_alt=boundary_alt,
-        boundary_related=boundary_related,
-        boundary_mixed=boundary_mixed,
-    )
-    return encode_raw(message), attached_count, attachment_errors
+    return to, cc, bcc, had_unresolved, missing_scopes
 
 
 def _prepare_gmail_message(
@@ -2037,23 +1792,10 @@ def _prepare_gmail_message(
     from_email: Optional[str] = None,
     from_name: Optional[str] = None,
     attachments: Optional[List[Dict[str, str]]] = None,
-    web_compose: bool = False,
-    html_body: Optional[str] = None,
-    direction: Literal["auto", "ltr", "rtl"] = "auto",
-    include_bcc_header: bool = True,
+    plain_body: Optional[str] = None,
 ) -> tuple[str, Optional[str], int, List[str]]:
     """
     Prepare a Gmail message with threading and attachment support.
-
-    When ``web_compose`` is True the message is assembled to be byte-faithful
-    to a Gmail-web compose via ``_prepare_gmail_message_web``. ``body`` is the
-    fully-assembled text/plain content and ``html_body`` the fully-assembled
-    text/html content; when ``html_body`` is omitted it is derived from
-    ``body``. ``to``/``cc``/``bcc`` are expected pre-formatted
-    (``Display Name <addr>``); ``from`` is formatted here from ``from_email`` +
-    optional ``from_name``. ``direction`` sets the base text direction of a
-    derived HTML part (``"auto"`` detects it from ``body``). Attachments (inline
-    or regular) are handled on this path too, via ``assemble_web_message``.
 
     Args:
         subject: Email subject
@@ -2068,55 +1810,22 @@ def _prepare_gmail_message(
         from_email: Optional sender email address
         from_name: Optional sender display name (e.g., "Peter Hartree")
         attachments: Optional list of attachments. Each can have 'path' (file path) OR 'content' (base64) + 'filename'
+        plain_body: Explicit text alternative for HTML, preserving a forwarded original.
 
     Returns:
         Tuple of (raw_message, thread_id, attached_count, attachment_errors)
         where raw_message is base64 encoded.
     """
-    # Handle reply subject formatting
-    reply_subject = subject
-    if in_reply_to and not subject.lower().startswith("re:"):
-        reply_subject = f"Re: {subject}"
-
     # Prepare the email
     normalized_format = body_format.lower()
     if normalized_format not in {"plain", "html"}:
         raise ValueError("body_format must be either 'plain' or 'html'.")
 
-    # Gmail-web faithful path: build MIME by hand so charset casing, boundary
-    # shape, and part ordering match a real web compose.
-    if web_compose:
-        # When the caller did not supply an HTML part, derive it from ``body``
-        # so the path still yields both parts.
-        if html_body is not None:
-            plain_part = body
-            html_part = html_body
-        else:
-            plain_part, html_part = _derive_web_bodies(
-                body, normalized_format, direction
-            )
-
-        raw_message, web_count, web_errors = _prepare_gmail_message_web(
-            subject=reply_subject,
-            plain_body=plain_part,
-            html_body=html_part,
-            to=to,
-            cc=cc,
-            bcc=bcc,
-            in_reply_to=in_reply_to,
-            references=references,
-            from_email=from_email,
-            from_name=from_name,
-            attachments=attachments or None,
-            include_bcc_header=include_bcc_header,
-        )
-        return raw_message, thread_id, web_count, web_errors
-
     attached_count = 0
     attachment_errors: List[str] = []
     message = EmailMessage(policy=SMTP)
 
-    message["Subject"] = reply_subject
+    message["Subject"] = _reply_subject(subject, in_reply_to)
 
     # Add sender if provided
     if from_email:
@@ -2134,7 +1843,7 @@ def _prepare_gmail_message(
         message["To"] = to
     if cc:
         message["Cc"] = cc
-    if bcc and include_bcc_header:
+    if bcc:
         message["Bcc"] = bcc
 
     # Add reply headers for threading
@@ -2150,61 +1859,150 @@ def _prepare_gmail_message(
         # a non-HTML client actually displays, so block boundaries have to
         # survive -- _html_to_text() flattens them and would run paragraphs
         # together ("First paragraph.Second paragraph.").
-        plain_body = html_to_text_preserving_breaks(body).strip()
+        if plain_body is None:
+            plain_body = html_to_text_preserving_breaks(body).strip()
         message.set_content(plain_body)
         message.add_alternative(body, subtype="html")
     else:
         message.set_content(body)
 
-    inline_parts, attachment_parts, attached_count, split_errors = (
-        _split_resolved_attachments(list(attachments or []))
-    )
-    attachment_errors.extend(split_errors)
+    seen_content_ids: set[str] = set()
 
-    # Build the EmailMessage tree from the classified parts.
-    for ip in inline_parts:
-        main_type, sub_type = (
-            ip["mime_type"].split("/", 1)
-            if "/" in ip["mime_type"]
-            else ("application", "octet-stream")
-        )
-        cid_value = ip["content_id"]
-        target = None
-        for part in message.walk():
-            if part.get_content_type() == "multipart/related":
-                target = part
-                break
-        if target is None:
-            for part in message.walk():
-                if part.get_content_type() == "text/html":
-                    target = part
-                    break
-        if target is None:
-            target = message
-        target.add_related(
-            ip["data"],
-            maintype=main_type,
-            subtype=sub_type,
-            cid=f"<{cid_value}>",
-            filename=ip["filename"],
-            disposition="inline",
-        )
+    for attachment in attachments or []:
+        if attachment.get("error"):
+            attachment_errors.append(_format_resolved_attachment_error(attachment))
+            continue
 
-    for ap in attachment_parts:
-        main_type, sub_type = (
-            ap["mime_type"].split("/", 1)
-            if "/" in ap["mime_type"]
-            else ("application", "octet-stream")
-        )
-        attachment_id = _new_attachment_id()
-        message.add_attachment(
-            ap["data"],
-            maintype=main_type,
-            subtype=sub_type,
-            filename=ap["filename"],
-            cid=f"<{attachment_id}>",
-            headers=[f"X-Attachment-Id: {attachment_id}"],
-        )
+        file_path = attachment.get("path")
+        filename = attachment.get("filename")
+        content_base64 = attachment.get("content")
+        resolved_bytes = attachment.get("_resolved_bytes")
+        mime_type = attachment.get("mime_type")
+        content_id = attachment.get("content_id")
+
+        try:
+            if resolved_bytes is not None:
+                # Pre-resolved from a URL by _resolve_url_attachments.
+                file_data = resolved_bytes
+                if not filename:
+                    filename = "attachment"
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            elif file_path:
+                path_obj = validate_file_path(file_path)
+                if not path_obj.exists():
+                    logger.error(f"File not found: path_len={len(file_path)}")
+                    continue
+
+                with open(path_obj, "rb") as f:
+                    file_data = f.read()
+
+                if not filename:
+                    filename = path_obj.name
+
+                if not mime_type:
+                    mime_type, _ = mimetypes.guess_type(str(path_obj))
+                    if not mime_type:
+                        mime_type = "application/octet-stream"
+            elif content_base64:
+                if not filename:
+                    logger.warning("Skipping attachment: missing filename")
+                    continue
+
+                file_data = base64.b64decode(content_base64)
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+            else:
+                logger.warning("Skipping attachment: missing path, content, and url")
+                continue
+
+            safe_filename = (
+                (filename or "attachment")
+                .replace("\r", "")
+                .replace("\n", "")
+                .replace("\x00", "")
+            ) or "attachment"
+
+            main_type, sub_type = (
+                mime_type.split("/", 1)
+                if mime_type and "/" in mime_type
+                else ("application", "octet-stream")
+            )
+            if content_id:
+                cid_value = _normalize_attachment_content_id(content_id)
+                if cid_value in seen_content_ids:
+                    logger.warning(
+                        "Duplicate content_id on attachment: content_id_len=%d, "
+                        "filename_len=%d, path_len=%d; email clients may only "
+                        "render one instance",
+                        len(cid_value),
+                        len(filename) if filename else 0,
+                        len(file_path) if file_path else 0,
+                    )
+                seen_content_ids.add(cid_value)
+                # Find the right MIME part to attach the inline image to.
+                # First inline image: target text/html (creates multipart/related).
+                # Subsequent inline images: target the existing multipart/related
+                # (appends as sibling). Use walk() for recursive search since
+                # iter_parts() only iterates direct children and html may be nested
+                # inside multipart/related after the first inline image is added.
+                target = None
+                for part in message.walk():
+                    if part.get_content_type() == "multipart/related":
+                        target = part
+                        break
+                if target is None:
+                    for part in message.walk():
+                        if part.get_content_type() == "text/html":
+                            target = part
+                            break
+                if target is None:
+                    target = message  # Plain-text body fallback
+                target.add_related(
+                    file_data,
+                    maintype=main_type,
+                    subtype=sub_type,
+                    cid=f"<{cid_value}>",
+                    filename=safe_filename,
+                    disposition="inline",
+                    headers=[f"X-Attachment-Id: {cid_value}"],
+                )
+                logger.info(
+                    f"Attached inline: content_id_len={len(cid_value)}, "
+                    f"filename_len={len(safe_filename)} ({len(file_data)} bytes)"
+                )
+            else:
+                attachment_id = _new_attachment_id()
+                message.add_attachment(
+                    file_data,
+                    maintype=main_type,
+                    subtype=sub_type,
+                    filename=safe_filename,
+                    cid=f"<{attachment_id}>",
+                    headers=[f"X-Attachment-Id: {attachment_id}"],
+                )
+                logger.info(
+                    f"Attached file: filename_len={len(safe_filename)} "
+                    f"({len(file_data)} bytes)"
+                )
+            attached_count += 1
+        except (binascii.Error, ValueError) as e:
+            logger.error(
+                f"Failed to decode attachment: "
+                f"filename_len={len(filename) if filename else 0}, "
+                f"path_len={len(file_path) if file_path else 0}, "
+                f"error_type={type(e).__name__}"
+            )
+            attachment_errors.append(_format_attachment_error(file_path, filename, e))
+            continue
+        except Exception as e:
+            logger.error(
+                f"Failed to attach: filename_len={len(filename) if filename else 0}, "
+                f"path_len={len(file_path) if file_path else 0}, "
+                f"error_type={type(e).__name__}"
+            )
+            attachment_errors.append(_format_attachment_error(file_path, filename, e))
+            continue
 
     # Encode message
     raw_message = base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode()
@@ -2287,9 +2085,7 @@ async def _fetch_search_result_headers(
                 headers_by_id[mid] = None
             else:
                 try:
-                    headers_by_id[mid] = _extract_headers(
-                        entry["data"].get("payload") or {}, GMAIL_METADATA_HEADERS
-                    )
+                    headers_by_id[mid] = _extract_search_metadata(entry["data"])
                 except Exception as exc:
                     logger.warning(
                         f"[search_gmail_messages] Invalid metadata for message {mid}, will retry: {exc}"
@@ -2313,9 +2109,7 @@ async def _fetch_search_result_headers(
             )
             if msg_data and not error:
                 try:
-                    headers_by_id[mid] = _extract_headers(
-                        msg_data.get("payload") or {}, GMAIL_METADATA_HEADERS
-                    )
+                    headers_by_id[mid] = _extract_search_metadata(msg_data)
                 except Exception as exc:
                     logger.warning(
                         f"[search_gmail_messages] Invalid metadata for message {mid} after retry: {exc}"
@@ -2326,6 +2120,14 @@ async def _fetch_search_result_headers(
                 )
 
     return headers_by_id
+
+
+def _extract_search_metadata(message: Dict[str, Any]) -> Dict[str, str]:
+    """Return a metadata fetch's headers, plus its label IDs under ``Labels`` if any."""
+    metadata = _extract_headers(message.get("payload") or {}, GMAIL_METADATA_HEADERS)
+    if label_ids := message.get("labelIds"):
+        metadata["Labels"] = ", ".join(label_ids)
+    return metadata
 
 
 def _format_gmail_results_plain(
@@ -2390,6 +2192,8 @@ def _format_gmail_results_plain(
                         f"     Date: {headers.get('Date', '(unknown date)')}",
                     ]
                 )
+                if headers.get("Labels"):
+                    lines.append(f"     Labels: {headers['Labels']}")
 
         lines.extend(
             [
@@ -2445,17 +2249,19 @@ async def search_gmail_messages(
 
     Args:
         query (str): The search query. Supports standard Gmail search operators.
+            Results include drafts unless the query excludes them (e.g. in:sent or -in:drafts).
         user_google_email (str): The user's Google email address. Required.
         page_size (int): The maximum number of messages to return. Defaults to 10.
         page_token (Optional[str]): Token for retrieving the next page of results. Use the next_page_token from a previous response.
         include_headers (bool): If True, also fetch each message's metadata and include
-            Subject, From, and Date per result. Costs one metadata get per result,
-            grouped into HTTP batches of up to 10, plus retries for transient failures.
+            Subject, From, Date and label IDs (e.g. DRAFT, SENT) per result. Costs one
+            metadata get per result, grouped into HTTP batches of up to 10, plus retries
+            for transient failures.
             Defaults to False (output unchanged from prior versions).
 
     Returns:
         str: LLM-friendly structured results with Message IDs, Thread IDs, and clickable Gmail web interface URLs for each found message.
-        With include_headers=True, each result also includes Subject, From, and Date.
+        With include_headers=True, each result also includes Subject, From, Date and Labels.
         Includes pagination token if more results are available.
     """
     logger.info(
@@ -3216,7 +3022,7 @@ async def get_gmail_attachment_content(
     title="Send Gmail Message",
     annotations=ToolAnnotations(
         readOnlyHint=False,
-        destructiveHint=False,
+        destructiveHint=True,
         idempotentHint=False,
         openWorldHint=True,
     ),
@@ -3253,7 +3059,7 @@ async def send_gmail_message(
     subject: Annotated[
         Optional[str],
         Field(
-            description="Email subject. Required when sending; optional when forwarding (defaults to 'Fwd: <original subject>').",
+            description="Email subject. Required for a new message. Optional when replying with thread_id (inherits the parent message's subject, adding 'Re:' only if absent) or when forwarding (defaults to 'Fwd: <original subject>').",
         ),
     ] = None,
     body: Annotated[
@@ -3265,7 +3071,7 @@ async def send_gmail_message(
     body_format: Annotated[
         Literal["plain", "html"],
         Field(
-            description="Format of the body content (and of the prepended note when forwarding). Use 'plain' for plaintext or 'html' for HTML content.",
+            description="Format of the body content (and of the prepended note when forwarding). Use 'plain' for plaintext or 'html' for HTML content. With 'html', write real markup; an entity-escaped body ('&lt;div&gt;') is rejected.",
         ),
     ] = "plain",
     forward_message_id: Annotated[
@@ -3329,10 +3135,7 @@ async def send_gmail_message(
         ),
     ] = True,
     direction: Annotated[
-        Literal["auto", "ltr", "rtl"],
-        Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script \u2192 right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
-        ),
+        TextDirection, Field(description=DIRECTION_DESCRIPTION)
     ] = "auto",
     quote_original: Annotated[
         bool,
@@ -3368,7 +3171,9 @@ async def send_gmail_message(
 
     Args:
         to (str): Recipient email address.
-        subject (str): Email subject. Required unless forwarding (then defaults to 'Fwd: <original subject>').
+        subject (str): Email subject. Required for a new message. Optional when replying
+            with thread_id (inherits the parent message's subject) or forwarding (then
+            defaults to 'Fwd: <original subject>').
         body (str): Email body content. Required unless forwarding (then an optional prepended note).
         body_format (Literal['plain', 'html']): Body format (and prepended note format when forwarding). Defaults to 'plain'.
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the tool forwards that message.
@@ -3499,6 +3304,8 @@ async def send_gmail_message(
             include_forwarded_attachments=False
         )
     """
+    _reject_entity_escaped_html_body(body, body_format)
+
     # Forwarding reuses the original message's content, so it follows a dedicated
     # path that fetches and quotes the source message.
     if forward_message_id:
@@ -3508,17 +3315,20 @@ async def send_gmail_message(
             raise UserInputError(
                 "'to' is required when forwarding via 'forward_message_id'."
             )
-        # Same Send-As displayName fallback as a regular send: only looked up
-        # when signatures are enabled, so the settings endpoint stays optional.
-        if include_signature and from_name is None:
-            _, _, from_name = await _get_send_as_identity_and_signature(
-                service,
-                from_email=from_email or user_google_email,
-                fallback_email=user_google_email,
-            )
         logger.info(
             f"[send_gmail_message] Forwarding message '{forward_message_id}' for '{user_google_email}'"
         )
+        # An explicit alias is always validated. Otherwise the Send-As
+        # displayName is only looked up when signatures are enabled, so the
+        # settings endpoint stays optional, as on a regular send.
+        if from_email or (include_signature and not from_name):
+            _, sender_display_name, _ = await _get_send_as_identity_and_signature(
+                service,
+                from_email=from_email or user_google_email,
+                fallback_email=user_google_email,
+                require_match=bool(from_email),
+            )
+            from_name = from_name or sender_display_name or None
         return await _forward_gmail_message_impl(
             service=service,
             message_id=forward_message_id,
@@ -3536,10 +3346,11 @@ async def send_gmail_message(
             direction=direction,
         )
 
-    if subject is None or body is None:
+    if body is None or (not thread_id and not (subject or "").strip()):
         raise UserInputError(
-            "Both 'subject' and 'body' are required when sending a message "
-            "(they are optional only when forwarding via 'forward_message_id')."
+            "'body' is required, and 'subject' is required unless replying with "
+            "thread_id (it is then inherited from the parent message) or "
+            "forwarding via 'forward_message_id'."
         )
 
     if reply_all and not thread_id:
@@ -3558,15 +3369,35 @@ async def send_gmail_message(
         f"[send_gmail_message] Invoked. Email: '{user_google_email}', subject_len={len(subject) if subject else 0}, Attachments: {len(attachments) if attachments else 0}"
     )
 
-    # Prepare the email message
-    # Use from_email (Send As alias) if provided, otherwise default to authenticated user
+    # The Send-As entry carries both the signature and the displayName Gmail web
+    # renders in the From line. With signatures disabled the settings endpoint
+    # is never touched and From stays the bare address unless from_name is given.
     sender_email = from_email or user_google_email
+    sender_display_name = signature_html = ""
+    if include_signature:
+        (
+            _,
+            sender_display_name,
+            signature_html,
+        ) = await _get_send_as_identity_and_signature(
+            service,
+            from_email=sender_email,
+            fallback_email=user_google_email,
+            require_match=bool(from_email),
+        )
+    from_name = from_name or sender_display_name or None
 
     # A reply's headers, recipients and quoted original are all derivable from the
     # thread, so a caller should not have to assemble them by hand. Mirrors
     # draft_gmail_message; one thread fetch serves all three.
     reply_context = None
-    if thread_id and (quote_original or reply_all or not in_reply_to or not references):
+    if thread_id and (
+        quote_original
+        or reply_all
+        or not (subject or "").strip()
+        or not in_reply_to
+        or not references
+    ):
         reply_context = await _fetch_thread_reply_context(
             service,
             thread_id,
@@ -3598,21 +3429,8 @@ async def send_gmail_message(
         raise UserInputError(
             f"Could not derive a recipient from thread '{thread_id}'. Pass 'to' explicitly."
         )
-
-    # Optionally append the Gmail signature from send-as settings, mirroring
-    # draft_gmail_message so sent mail respects the user's Settings > Signature.
-    # The send-as entry carries both the signature and the displayName Gmail web
-    # renders in the From line (the sender's own name is not in contacts, so
-    # Send-As is the right source). With signatures disabled the settings
-    # endpoint is never touched (no gmail.settings.basic requirement) and From
-    # stays the bare address unless from_name is given.
-    signature_html = ""
-    if include_signature:
-        _, signature_html, send_as_name = await _get_send_as_identity_and_signature(
-            service, from_email=sender_email, fallback_email=user_google_email
-        )
-        if from_name is None:
-            from_name = send_as_name
+    if thread_id and not (subject or "").strip():
+        subject = _inherit_reply_subject(thread_id, target_reply)
 
     if body_format == "html":
         # Bare newlines between text are invisible to HTML renderers; callers
@@ -3620,7 +3438,6 @@ async def send_gmail_message(
         # caller's body, before any signature or quoted original is attached.
         body = html_newlines_to_br(body)
 
-    resolved_attachments = await _resolve_url_attachments(attachments)
     # Resolve send transport before building the raw message so we know whether
     # to include the Bcc header (API keeps it; SMTP omits it - envelope-only).
     # Off-thread: with the GCS credential-store backend this can do a blocking
@@ -3630,14 +3447,19 @@ async def send_gmail_message(
     )
 
     # Every send (with or without attachments) takes the Gmail-web faithful path.
-    (
-        raw_message,
-        attached_count,
-        attachment_errors,
-        had_unresolved,
-        missing_scopes,
-    ) = await _build_web_compose_raw(
+    resolved_attachments = await _resolve_url_attachments(attachments)
+    inline_parts, attachment_parts, attached_count, attachment_errors = (
+        _split_resolved_attachments(resolved_attachments or [])
+    )
+    to, cc, bcc, had_unresolved, missing_scopes = await _resolve_web_recipient_names(
         people_service,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        from_email=sender_email,
+        thread_names=send_thread_names,
+    )
+    raw_message = _build_web_compose_raw(
         subject=subject,
         body=_append_signature_to_body(body, body_format, signature_html),
         body_format=body_format,
@@ -3650,8 +3472,8 @@ async def send_gmail_message(
         references=references,
         direction=direction,
         reply_target=target_reply if quote_original else None,
-        attachments=resolved_attachments or None,
-        thread_names=send_thread_names,
+        inline_parts=inline_parts,
+        attachment_parts=attachment_parts,
         include_bcc_header=(effective == "api"),
     )
     thread_id_final = thread_id
@@ -3714,7 +3536,7 @@ async def _forward_gmail_message_impl(
     from_name: Optional[str] = None,
     from_email: Optional[str] = None,
     user_google_email: str = "",
-    direction: Literal["auto", "ltr", "rtl"] = "auto",
+    direction: TextDirection = "auto",
     as_draft: bool = False,
     attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
@@ -3734,28 +3556,6 @@ async def _forward_gmail_message_impl(
     )
 
     payload = original_message.get("payload", {})
-
-    # --- Parse original message metadata ---
-    orig_headers = _extract_headers(payload, ["Subject", "From", "Date", "To"])
-    orig_subject = orig_headers.get("Subject", "(no subject)")
-    orig_from_raw = orig_headers.get("From", "")
-    orig_date_str = orig_headers.get("Date", "")
-    orig_to_raw = orig_headers.get("To", "")
-    orig_bodies = _extract_message_bodies(payload)
-    orig_plain = orig_bodies.get("text", "")
-    orig_html = orig_bodies.get("html", "")
-
-    # Parse the original From into display name + email.
-    orig_from_name, orig_from_email = parseaddr(orig_from_raw)
-    orig_from_name = orig_from_name.strip() or None
-
-    # Derive the forward subject, avoiding a double prefix for "Fwd:"/"FW:".
-    if subject:
-        forward_subject = subject
-    elif orig_subject.lower().lstrip().startswith(("fwd:", "fw:")):
-        forward_subject = orig_subject
-    else:
-        forward_subject = f"Fwd: {orig_subject}"
 
     # Handle attachments
     attachments_to_send = []
@@ -3798,10 +3598,12 @@ async def _forward_gmail_message_impl(
                 # downstream base64.b64decode() in _prepare_gmail_message succeeds.
                 urlsafe_data = attachment_data.get("data", "")
                 padded = urlsafe_data + "=" * (-len(urlsafe_data) % 4)
-                att_bytes = base64.urlsafe_b64decode(padded)
+                standard_b64 = base64.b64encode(
+                    base64.urlsafe_b64decode(padded)
+                ).decode()
                 attachments_to_send.append(
                     {
-                        "data": att_bytes,
+                        "content": standard_b64,
                         "filename": att["filename"],
                         "mime_type": att["mimeType"],
                     }
@@ -3827,61 +3629,14 @@ async def _forward_gmail_message_impl(
 
     attachments_to_send.extend(await _resolve_url_attachments(attachments) or [])
 
-    # --- Build forwarded bodies via Gmail-web faithful builders ---
-
-    # Fill whichever body the original lacks from the other (mirrors
-    # _build_web_reply_bodies): an HTML-only original still needs its text in
-    # the forward's text/plain part, keeping block breaks.
-    if not orig_plain and orig_html:
-        orig_plain = html_to_text_preserving_breaks(orig_html).strip()
-    if not orig_html and orig_plain:
-        orig_html = "<br>".join(html.escape(line) for line in orig_plain.split("\n"))
-
-    # Plain-text note from the user (if any).
-    if forward_message and forward_message_format == "html":
-        # Strip tags for the plain note portion, keeping block boundaries.
-        note_plain = html_to_text_preserving_breaks(forward_message).strip()
-        note_html = html_newlines_to_br(forward_message)
-    else:
-        note_plain = forward_message or ""
-        note_html = plain_body_to_html(forward_message) if forward_message else ""
-
-    # Plain body: optional note + forwarded block (NOT > -quoted).
-    fwd_plain_block = build_forwarded_plain(
-        from_name=orig_from_name,
-        from_email=orig_from_email or orig_from_raw,
-        date_str=orig_date_str,
-        subject=orig_subject,
-        to_rendered_plain=orig_to_raw,
-        orig_plain=orig_plain,
+    forward_subject, forward_plain, forward_html = _build_forward_content(
+        _extract_headers(payload, ["Subject", "From", "Date", "To"]),
+        _extract_message_bodies(payload),
+        forward_message,
+        forward_message_format,
+        subject,
+        direction,
     )
-    if note_plain:
-        forward_plain = f"{note_plain}\n\n{fwd_plain_block}"
-    else:
-        forward_plain = fwd_plain_block
-
-    # HTML body: note div + forwarded container (no blockquote).
-    fwd_html_container = build_forwarded_container_html(
-        from_name=orig_from_name,
-        from_email=orig_from_email or orig_from_raw,
-        date_str=orig_date_str,
-        subject=orig_subject,
-        to_rendered=render_forward_recipients_html(orig_to_raw),
-        orig_html=orig_html,
-    )
-    if note_html:
-        # Base direction follows the user's note; the forwarded original keeps
-        # its own dir markup inside the container.
-        note_dir = base_text_direction(note_plain) if direction == "auto" else direction
-        forward_html = new_message_html(
-            f"{note_html}<br><br>{fwd_html_container}", note_dir
-        )
-    else:
-        # No note: nothing user-authored to orient, so "auto" stays ltr
-        # (byte-identical); an explicit direction is still honored.
-        forward_html = new_message_html(
-            f"<br>{fwd_html_container}", "ltr" if direction == "auto" else direction
-        )
 
     # --- Prepare and send the message ---
     sender_email = from_email or user_google_email
@@ -3899,7 +3654,10 @@ async def _forward_gmail_message_impl(
             resolve_effective_transport, user_google_email
         )
 
-    raw_message, attached_count, attachment_errors = _prepare_gmail_message_web(
+    inline_parts, attachment_parts, attached_count, attachment_errors = (
+        _split_resolved_attachments(attachments_to_send)
+    )
+    raw_message = _prepare_gmail_message_web(
         subject=forward_subject,
         plain_body=forward_plain,
         html_body=forward_html,
@@ -3908,7 +3666,8 @@ async def _forward_gmail_message_impl(
         bcc=bcc,
         from_email=sender_email,
         from_name=from_name,
-        attachments=attachments_to_send if attachments_to_send else None,
+        inline_parts=inline_parts,
+        attachment_parts=attachment_parts,
         include_bcc_header=(effective == "api"),
     )
     if attachments_to_send and attached_count != len(attachments_to_send):
@@ -3991,7 +3750,7 @@ async def draft_gmail_message(
     subject: Annotated[
         Optional[str],
         Field(
-            description="Email subject. Required unless forwarding (then defaults to 'Fwd: <original subject>').",
+            description="Email subject. Required for a new draft. Optional when replying with thread_id (inherits the parent message's subject, adding 'Re:' only if absent) or when forwarding (then defaults to 'Fwd: <original subject>').",
         ),
     ] = None,
     body: Annotated[
@@ -4003,7 +3762,7 @@ async def draft_gmail_message(
     body_format: Annotated[
         Literal["plain", "html"],
         Field(
-            description="Email body format. Use 'plain' for plaintext or 'html' for HTML content.",
+            description="Email body format. Use 'plain' for plaintext or 'html' for HTML content. With 'html', write real markup; an entity-escaped body ('&lt;div&gt;') is rejected.",
         ),
     ] = "plain",
     forward_message_id: Annotated[
@@ -4079,10 +3838,7 @@ async def draft_gmail_message(
         ),
     ] = False,
     direction: Annotated[
-        Literal["auto", "ltr", "rtl"],
-        Field(
-            description="Base text direction for the composed body. 'auto' (default) detects it from the body via the Unicode bidi first-strong-character rule (a right-to-left script \u2192 right-to-left, otherwise left-to-right); 'ltr'/'rtl' force it. Embedded opposite-direction runs (Latin words, numerals) always render correctly via the browser's bidi algorithm. Note: this orients the HTML body via a dir attribute, matching Gmail web's bare-fragment output. Some clients (e.g. Spark iOS) ignore dir on a wrapperless fragment and render right-to-left text left-aligned; this is a client-side limitation that likewise affects real Gmail-web-composed RTL mail.",
-        ),
+        TextDirection, Field(description=DIRECTION_DESCRIPTION)
     ] = "auto",
 ) -> str:
     """
@@ -4106,7 +3862,9 @@ async def draft_gmail_message(
 
     Args:
         user_google_email (str): The user's Google email address. Required for authentication.
-        subject (Optional[str]): Email subject. Required unless forwarding (then defaults to 'Fwd: <original subject>').
+        subject (Optional[str]): Email subject. Required for a new draft. Optional when
+            replying with thread_id (inherits the parent message's subject) or forwarding
+            (then defaults to 'Fwd: <original subject>').
         body (Optional[str]): Email body. Required unless forwarding (then an optional prepended note).
         body_format (Literal['plain', 'html']): Email body format. Defaults to 'plain'.
         forward_message_id (Optional[str]): Gmail message ID to forward. When set, the draft is a forward of that message.
@@ -4204,17 +3962,19 @@ async def draft_gmail_message(
             body="FYI - see below."
         )
     """
+    _reject_entity_escaped_html_body(body, body_format)
+
     if forward_message_id:
-        # Resolve the identity and Gmail-web From displayName the same way as a
-        # regular draft below.
-        if from_email and not include_signature:
-            sender_email = from_email
-        else:
-            sender_email, _, send_as_name = await _get_send_as_identity_and_signature(
-                service, from_email=from_email, fallback_email=user_google_email
-            )
-            if from_name is None:
-                from_name = send_as_name
+        # Resolve and validate the identity, and take its Gmail-web From
+        # displayName, the same way as a regular draft below.
+        (
+            sender_email,
+            sender_display_name,
+            _,
+        ) = await _get_send_as_identity_and_signature(
+            service, from_email=from_email, fallback_email=user_google_email
+        )
+        from_name = from_name or sender_display_name or None
         logger.info(
             f"[draft_gmail_message] Drafting forward of message '{forward_message_id}' for '{user_google_email}'"
         )
@@ -4236,10 +3996,12 @@ async def draft_gmail_message(
             as_draft=True,
         )
 
-    if subject is None or body is None:
+    if body is None or (not thread_id and not (subject or "").strip()):
         raise UserInputError(
-            "Both 'subject' and 'body' are required when drafting a message "
-            "(they are optional only when forwarding via 'forward_message_id')."
+            "Both 'subject' and 'body' are required when drafting a message. "
+            "'subject' may be omitted when replying with thread_id, where it is "
+            "inherited from the parent message; both are optional only when "
+            "forwarding via 'forward_message_id'."
         )
 
     logger.info(
@@ -4250,28 +4012,32 @@ async def draft_gmail_message(
     # its signature is disabled. Otherwise resolve the identity, signature and
     # Gmail-web From displayName together so Gmail's default sender and its
     # signature stay aligned.
-    send_as_name = None
     if from_email and not include_signature:
-        sender_email, resolved_signature_html = from_email, ""
+        sender_email, sender_display_name, resolved_signature_html = from_email, "", ""
     else:
         (
             sender_email,
+            sender_display_name,
             resolved_signature_html,
-            send_as_name,
         ) = await _get_send_as_identity_and_signature(
             service,
             from_email=from_email,
             fallback_email=user_google_email,
         )
-    if from_name is None:
-        from_name = send_as_name
+    from_name = from_name or sender_display_name or None
     # Convert only the caller's body, before any signature or quoted original
     # is attached; see send_gmail_message.
     draft_body = html_newlines_to_br(body) if body_format == "html" else body
     signature_html = resolved_signature_html if include_signature else ""
 
     reply_context = None
-    if thread_id and (quote_original or not in_reply_to or not references or not to):
+    if thread_id and (
+        quote_original
+        or not (subject or "").strip()
+        or not in_reply_to
+        or not references
+        or not to
+    ):
         reply_context = await _fetch_thread_reply_context(
             service,
             thread_id,
@@ -4297,19 +4063,23 @@ async def draft_gmail_message(
     )
     if thread_id and not to and target_reply:
         to = target_reply.get("reply_to") or target_reply.get("from") or to
-    if thread_id and not subject.strip() and target_reply:
-        subject = target_reply.get("subject") or subject
+    if thread_id and not (subject or "").strip():
+        subject = _inherit_reply_subject(thread_id, target_reply)
 
-    resolved_attachments = await _resolve_url_attachments(attachments)
     # Every draft (with or without attachments) takes the Gmail-web faithful path.
-    (
-        raw_message,
-        attached_count,
-        attachment_errors,
-        had_unresolved,
-        missing_scopes,
-    ) = await _build_web_compose_raw(
+    resolved_attachments = await _resolve_url_attachments(attachments)
+    inline_parts, attachment_parts, attached_count, attachment_errors = (
+        _split_resolved_attachments(resolved_attachments or [])
+    )
+    to, cc, bcc, had_unresolved, missing_scopes = await _resolve_web_recipient_names(
         people_service,
+        to=to,
+        cc=cc,
+        bcc=bcc,
+        from_email=sender_email,
+        thread_names=draft_thread_names,
+    )
+    raw_message = _build_web_compose_raw(
         subject=subject,
         body=_append_signature_to_body(draft_body, body_format, signature_html),
         body_format=body_format,
@@ -4322,8 +4092,8 @@ async def draft_gmail_message(
         references=references,
         direction=direction,
         reply_target=target_reply if quote_original else None,
-        attachments=resolved_attachments or None,
-        thread_names=draft_thread_names,
+        inline_parts=inline_parts,
+        attachment_parts=attachment_parts,
         include_bcc_header=True,
     )
     name_note = (
@@ -5254,14 +5024,6 @@ async def modify_gmail_message_labels(
     return f"Message labels updated successfully!\nMessage ID: {message_id}\n{'; '.join(actions)}"
 
 
-def _format_id_list(ids: List[str], limit: int = 10) -> str:
-    """Join IDs for a result message, truncating very long lists."""
-    shown = ", ".join(ids[:limit])
-    if len(ids) > limit:
-        shown += f", … (+{len(ids) - limit} more)"
-    return shown
-
-
 async def _verify_batch_label_changes(
     service,
     message_ids: List[str],
@@ -5384,49 +5146,51 @@ async def _verify_batch_label_changes(
 async def batch_modify_gmail_message_labels(
     service,
     user_google_email: str,
-    message_ids: StringList,
+    message_ids: _OptionalLabelIdList = None,
     add_label_ids: _OptionalLabelIdList = None,
     remove_label_ids: _OptionalLabelIdList = None,
     verify: bool = True,
+    thread_ids: _OptionalLabelIdList = None,
 ) -> str:
     """
-    Adds or removes labels from multiple Gmail messages in a single batch request.
+    Adds or removes labels from multiple Gmail messages in a single batch request,
+    or from whole conversations via thread_ids.
 
-    Takes MESSAGE ids, not thread ids. Gmail's batch endpoint returns no
+    message_ids takes MESSAGE ids. Gmail's batch endpoint returns no
     per-message result and silently ignores ids it does not recognise, so by
     default this reads the messages back afterwards and reports which ids
     actually changed.
 
+    thread_ids applies the change to EVERY message of each conversation
+    (users.threads.modify), e.g. archive a conversation with
+    remove_label_ids=["INBOX"] or mark it read with remove_label_ids=["UNREAD"].
+    Each thread reports its own outcome. message_ids and thread_ids can be
+    combined; at least one is required.
+
     Args:
         user_google_email (str): The user's Google email address. Required.
-        message_ids (List[str]): A list of message IDs to modify.
+        message_ids (Optional[List[str]]): A list of message IDs to modify.
         add_label_ids (Optional[List[str]]): List of label IDs to add to the messages.
         remove_label_ids (Optional[List[str]]): List of label IDs to remove from the messages.
         verify (bool): Read the messages back and report per-id outcomes. Costs
             one extra (batched) read per id. Set False for very large sweeps
             where that cost matters and an unverified result is acceptable.
+            Not needed for thread_ids, which always report per thread.
+        thread_ids (Optional[List[str]]): Thread (conversation) IDs to modify.
 
     Returns:
         str: Which label changes were applied, and which ids did not resolve.
     """
     logger.info(
-        f"[batch_modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Message IDs: '{message_ids}'"
+        f"[batch_modify_gmail_message_labels] Invoked. Email: '{user_google_email}', Message IDs: '{message_ids}', Thread IDs: '{thread_ids}'"
     )
 
     if not add_label_ids and not remove_label_ids:
         raise Exception(
             "At least one of add_label_ids or remove_label_ids must be provided."
         )
-
-    body = {"ids": message_ids}
-    if add_label_ids:
-        body["addLabelIds"] = add_label_ids
-    if remove_label_ids:
-        body["removeLabelIds"] = remove_label_ids
-
-    await asyncio.to_thread(
-        service.users().messages().batchModify(userId="me", body=body).execute
-    )
+    if not message_ids and not thread_ids:
+        raise Exception("At least one of message_ids or thread_ids must be provided.")
 
     actions = []
     if add_label_ids:
@@ -5434,6 +5198,35 @@ async def batch_modify_gmail_message_labels(
     if remove_label_ids:
         actions.append(f"Removed labels: {', '.join(remove_label_ids)}")
     action_summary = "; ".join(actions)
+
+    thread_report = ""
+    if thread_ids:
+        outcomes = await modify_gmail_thread_labels(
+            service, thread_ids, add_label_ids, remove_label_ids
+        )
+        thread_report = format_thread_label_outcomes(
+            thread_ids, outcomes, action_summary
+        )
+        if not message_ids:
+            return thread_report
+
+    body = {"ids": message_ids}
+    if add_label_ids:
+        body["addLabelIds"] = add_label_ids
+    if remove_label_ids:
+        body["removeLabelIds"] = remove_label_ids
+
+    try:
+        await asyncio.to_thread(
+            service.users().messages().batchModify(userId="me", body=body).execute
+        )
+    except Exception as error:
+        if not thread_report:
+            raise
+        raise ToolExecutionError(
+            f"Label change for message_ids failed: {error}\n\n"
+            f"The thread_ids part was already processed:\n{thread_report}"
+        ) from error
 
     total = len(message_ids)
 
@@ -5443,7 +5236,7 @@ async def batch_modify_gmail_message_labels(
             "NOT VERIFIED: Gmail's batchModify returns no per-message result and "
             "silently ignores IDs it does not recognise, so this records what was "
             "asked for, not what changed. Re-run with verify=True to confirm."
-        )
+        ) + (f"\n\n{thread_report}" if thread_report else "")
 
     statuses = await _verify_batch_label_changes(
         service, message_ids, add_label_ids, remove_label_ids
@@ -5475,4 +5268,7 @@ async def batch_modify_gmail_message_labels(
             "  The read-back failed; the change may or may not have been applied."
         )
 
+    if thread_report:
+        lines.append("")
+        lines.append(thread_report)
     return "\n".join(lines)

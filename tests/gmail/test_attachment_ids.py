@@ -5,6 +5,7 @@ import re
 from email import message_from_bytes
 from email.policy import SMTP
 
+from gmail.gmail_helpers import _prepare_gmail_message_web
 from gmail.gmail_tools import _prepare_gmail_message
 
 
@@ -65,21 +66,22 @@ def _web_attachment_parts(raw_b64url: str):
 
 def test_web_compose_regular_attachments_get_unique_matching_ids():
     """The Gmail-web path emits X-Attachment-Id and a matching Content-ID too."""
-    raw_b64, _, attached, errors = _prepare_gmail_message(
+    raw_b64 = _prepare_gmail_message_web(
         subject="attachment-id-test",
-        body="three files",
+        plain_body="three files",
+        html_body="<div>three files</div>",
         to="someone@example.com",
         from_email="me@example.com",
-        web_compose=True,
-        attachments=[
-            _pdf("presentation.pdf", b"%PDF-1.7 presentation"),
-            _pdf("pricing.pdf", b"%PDF-1.7 pricing"),
-            _pdf("contract.pdf", b"%PDF-1.7 contract"),
+        attachment_parts=[
+            {"filename": n, "mime_type": "application/pdf", "data": d}
+            for n, d in [
+                ("presentation.pdf", b"%PDF-1.7 presentation"),
+                ("pricing.pdf", b"%PDF-1.7 pricing"),
+                ("contract.pdf", b"%PDF-1.7 contract"),
+            ]
         ],
     )
 
-    assert errors == []
-    assert attached == 3
     parts = _web_attachment_parts(raw_b64)
     ids = [str(p.get("X-Attachment-Id", "")).strip() for p in parts]
     assert len(ids) == 3

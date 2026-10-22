@@ -14,7 +14,7 @@ from auth.scopes import (
     has_required_scopes,
 )
 from core.config import get_send_transport
-from core.utils import GOOGLE_API_WRITE_RETRIES
+from gmail.gmail_helpers import send_message_once
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +136,7 @@ async def dispatch_transmit(
     if thread_id_final:
         send_body["threadId"] = thread_id_final
 
-    sent = await asyncio.to_thread(
-        service.users().messages().send(userId="me", body=send_body).execute,
-        num_retries=GOOGLE_API_WRITE_RETRIES,
-    )
+    sent = await send_message_once(service, send_body)
     mid = sent.get("id")
     return f"{action_label}{attachment_info}! Message ID: {mid}{fallback_note}{trailing_note}"
 

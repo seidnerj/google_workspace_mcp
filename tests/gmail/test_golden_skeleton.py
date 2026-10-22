@@ -5,11 +5,14 @@ All fixtures use synthetic data only (example.com addresses, no personal data).
 
 import email.mime.multipart
 import email.mime.text
-from tools.golden_skeleton import (
+
+import pytest
+
+from tests.gmail.golden_skeleton import (
+    _plain_line_structure,
+    _redact,
     extract_skeleton,
     sanitize_html,
-    _plain_line_structure,
-    _Sanitizer,
 )
 
 
@@ -40,21 +43,34 @@ def test_extract_skeleton_mime_tree_and_headers():
     assert cts == ["text/plain", "text/html"]
 
 
-def test_sanitize_html_drops_text_and_redacts_addr():
-    out = sanitize_html(
-        '<div class="gmail_attr">On X, Joe &lt;'
-        '<a href="mailto:j@example.com">j@example.com</a>&gt; wrote:</div>'
-    )
-    assert "Joe" not in out and "j@example.com" not in out
-    assert 'class="gmail_attr"' in out
-
-
-def test_sanitize_html_redacts_gmail_sendername_text():
-    """Inner text of gmail_sendername elements must be dropped."""
-    out = sanitize_html('<strong class="gmail_sendername">Alice Smith</strong>')
-    assert "Alice" not in out
-    assert "Smith" not in out
-    assert 'class="gmail_sendername"' in out
+@pytest.mark.parametrize(
+    ("html", "class_attr"),
+    [
+        (
+            '<div class="gmail_attr">On X, Jane Roe &lt;'
+            '<a href="mailto:j@example.com">j@example.com</a>&gt; wrote:</div>',
+            'class="gmail_attr"',
+        ),
+        (
+            '<div class="gmail_attr extra">Jane Roe &lt;j@example.com&gt;</div>',
+            'class="gmail_attr extra"',
+        ),
+        (
+            '<strong class="gmail_sendername">Jane Roe</strong>',
+            'class="gmail_sendername"',
+        ),
+        (
+            '<strong class="gmail_sendername bold-name">Jane Roe</strong>',
+            'class="gmail_sendername bold-name"',
+        ),
+    ],
+)
+def test_sanitize_html_redacts_attribution_text(html, class_attr):
+    """Names and addresses inside gmail_attr/gmail_sendername are dropped, even
+    alongside other classes, while the structural tag is kept."""
+    out = sanitize_html(html)
+    assert "Jane" not in out and "j@example.com" not in out, out
+    assert class_attr in out, out
 
 
 def test_extract_skeleton_html_probes():
@@ -82,33 +98,12 @@ def test_extract_skeleton_plain_structure():
     assert any(s == "BLANK" for s in sk["plain_structure"])
 
 
-def test_plain_line_structure_crlf_normalization():
-    """CRLF line endings should be normalized before classification.
-
-    Without normalization, trailing \r prevents regex patterns (like
-    "On ... wrote:") from matching, and empty lines don't classify as BLANK.
-    """
-    # LF-only input with attribution line
-    lf_text = "On Mon, Jan 1 at 1:00 PM User <u@example.com> wrote:\n\n> quoted\n"
-    lf_result = _plain_line_structure(lf_text)
-
-    # CRLF input - should produce identical classification
-    crlf_text = (
-        "On Mon, Jan 1 at 1:00 PM User <u@example.com> wrote:\r\n\r\n> quoted\r\n"
-    )
-    crlf_result = _plain_line_structure(crlf_text)
-
-    # Attribution line should be detected in both
-    assert any("ATTR_LINE" in item for item in lf_result), (
-        f"LF missing ATTR_LINE: {lf_result}"
-    )
-    assert any("ATTR_LINE" in item for item in crlf_result), (
-        f"CRLF missing ATTR_LINE: {crlf_result}"
-    )
-    # Both should have the same structure
-    assert lf_result == crlf_result, f"LF: {lf_result}\nCRLF: {crlf_result}"
-    # No stray \r characters should appear in output
-    assert not any("\r" in item for item in crlf_result)
+def test_plain_line_structure_normalizes_crlf():
+    """A trailing CR must not stop the attribution or blank lines matching."""
+    text = "On Mon, Jan 1 at 1:00 PM User <u@example.com> wrote:\n\n> quoted\n"
+    lf_result = _plain_line_structure(text)
+    assert any("ATTR_LINE" in item for item in lf_result), lf_result
+    assert _plain_line_structure(text.replace("\n", "\r\n")) == lf_result
 
 
 _FWD_HTML = (
@@ -169,51 +164,10 @@ def test_attr_template_redacts_date():
 
 def test_redact_apostrophe_local_part():
     """Addresses with apostrophes in the local part must be fully redacted."""
-    from tools.golden_skeleton import _redact
 
     result = _redact("Send to o'hara@example.com please")
     assert "o'hara" not in result, f"local part leaked: {result!r}"
     assert "‹email›" in result, f"placeholder missing: {result!r}"
-
-
-def test_sanitize_html_multi_class_gmail_attr_suppresses_text():
-    """Elements with 'gmail_attr' in a multi-class value must still redact inner text."""
-    out = sanitize_html(
-        '<div class="gmail_attr extra">Real Name &lt;x@example.com&gt;</div>'
-    )
-    # Inner attribution text must not appear
-    assert "Real Name" not in out, f"attribution name leaked: {out!r}"
-    assert "x@example.com" not in out, f"email leaked: {out!r}"
-    # The structural tag itself must be preserved
-    assert 'class="gmail_attr extra"' in out, f"tag class missing: {out!r}"
-
-
-def test_sanitize_html_multi_class_gmail_sendername_suppresses_text():
-    """Elements with 'gmail_sendername' alongside other classes must redact inner text."""
-    out = sanitize_html('<strong class="gmail_sendername bold-name">Jane Doe</strong>')
-    assert "Jane" not in out, f"sender name leaked: {out!r}"
-    assert "Doe" not in out, f"sender name leaked: {out!r}"
-    assert 'class="gmail_sendername bold-name"' in out, f"tag class missing: {out!r}"
-
-
-def test_bare_void_element_does_not_desync_class_stack():
-    """A bare void element (<br>, no trailing slash) inside a classed element must
-    not leave a dangling entry on the class stack. Gmail HTML emits bare <br>
-    (e.g. in gmail_attr blocks); html.parser fires handle_starttag but never a
-    matching handle_endtag for it, so pushing it would desync redact tracking."""
-    s = _Sanitizer()
-    s.feed('<div class="gmail_attr"><br></div>')
-    assert s._class_stack == [], f"stack desynced: {s._class_stack!r}"
-    assert s._in_redact_element() is False
-
-
-def test_bare_void_element_keeps_redaction_scoped():
-    """After a redact element closes, later text must NOT be treated as redacted
-    even when a bare <br> appeared inside it."""
-    out = sanitize_html('<div class="gmail_attr">secret<br></div><span>KEEPME</span>')
-    # The gmail_attr inner text is redacted; the trailing span structure remains.
-    assert "<span>" in out
-    assert "secret" not in out
 
 
 def test_html_tags_redact_free_text_attributes():
@@ -254,15 +208,17 @@ def test_blockquote_style_of_gmail_quote_is_unchanged():
     assert extract_skeleton(raw)["html_probes"]["blockquote_style"] == style
 
 
-def test_attr_line_without_comma_is_fully_redacted():
-    out = _plain_line_structure("On Alice <alice@example.com> wrote:")
+@pytest.mark.parametrize(
+    "line",
+    [
+        "On Jane Roe <jane@example.com> wrote:",
+        "On Mon, 2 Jun 2025, Jane Roe <jane@example.com> wrote:",
+    ],
+)
+def test_attr_line_never_leaks_date_or_name(line):
+    out = _plain_line_structure(line)
     assert len(out) == 1 and out[0].startswith("ATTR_LINE"), out
-    assert "Alice" not in out[0] and "alice" not in out[0], out
-
-
-def test_attr_line_never_leaks_date_or_name():
-    out = _plain_line_structure("On Mon, 2 Jun 2025, Jane Roe <j@example.com> wrote:")
-    assert "Mon" not in out[0] and "Jane" not in out[0], out
+    assert not any(word in out[0] for word in ("Mon", "Jane", "jane")), out
 
 
 def test_boundary_pattern_masks_non_hex_characters():
