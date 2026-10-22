@@ -318,6 +318,7 @@ async def test_auth_url_redirect_uri_uses_ephemeral_port(monkeypatch):
             tool_name="test_tool",
             user_google_email="user@gmail.com",
             required_scopes=["scope.a"],
+            allow_auth_flow=True,
         )
 
     assert bound["port"] != 8000
