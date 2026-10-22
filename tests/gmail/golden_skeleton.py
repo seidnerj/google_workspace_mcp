@@ -1,5 +1,6 @@
-"""Structural skeleton extractor for raw MIME messages.
+"""Structural skeleton extractor for raw MIME messages (test helper).
 
+Used to capture and compare the golden Gmail-web fixtures in ``fixtures/``.
 Produces a PII-safe structural representation of a raw MIME message: header
 name order, recursive MIME tree, HTML tag sequence, HTML literal probes, and
 plain-text line structure.  All email addresses, display names, and body text
@@ -12,32 +13,6 @@ from html.parser import HTMLParser
 
 EMAIL_RE = re.compile(
     r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"
-)
-
-# Elements whose *inner text* must also be redacted (not just dropped as
-# ordinary text nodes) because they carry display names or attribution text.
-_REDACT_TEXT_ELEMENTS = {"gmail_attr", "gmail_sendername"}
-
-# HTML void elements have no end tag. html.parser fires handle_starttag for a
-# bare one (e.g. <br>) but never a matching handle_endtag, so they must not be
-# pushed onto the class stack or they desync redact-scope tracking.
-_VOID_ELEMENTS = frozenset(
-    {
-        "area",
-        "base",
-        "br",
-        "col",
-        "embed",
-        "hr",
-        "img",
-        "input",
-        "link",
-        "meta",
-        "param",
-        "source",
-        "track",
-        "wbr",
-    }
 )
 
 
@@ -250,59 +225,20 @@ def _get_html_and_plain(msg) -> tuple[str, str]:
 
 
 class _Sanitizer(HTMLParser):
-    """Drop text nodes; keep only structural attribute values.
-
-    Special handling: text inside elements with class ``gmail_attr`` or
-    ``gmail_sendername`` is also suppressed (those elements carry attribution
-    text / sender display names that would otherwise leak through as text nodes
-    of a recognised structural element).
-    """
+    """Keep tags with redacted attributes; HTMLParser already drops text."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
         self._out: list[str] = []
-        # Stack of element class values so we can detect redact-text elements.
-        self._class_stack: list[set[str]] = []
-
-    def _in_redact_element(self) -> bool:
-        return any(classes & _REDACT_TEXT_ELEMENTS for classes in self._class_stack)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        cls_tokens: set[str] = set()
-        for name, value in attrs:
-            if name == "class" and value:
-                cls_tokens = set(value.split())
         self._out.append(_format_tag(tag, attrs))
-        # Void elements have no end tag, so don't track a scope for them.
-        if tag not in _VOID_ELEMENTS:
-            self._class_stack.append(cls_tokens)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
         self._out.append(f"</{tag}>")
-        if tag not in _VOID_ELEMENTS and self._class_stack:
-            self._class_stack.pop()
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # Self-closing tags - treat like start+end with no text children.
-        self.handle_starttag(tag, attrs)
-        # handle_starttag only pushed for non-void tags; balance that here.
-        if tag not in _VOID_ELEMENTS and self._class_stack:
-            self._class_stack.pop()
-
-    def handle_data(self, data: str) -> None:
-        # Suppress all text nodes; also suppress inner text of redact elements.
-        if self._in_redact_element():
-            return
-        # Plain text nodes outside redact elements are also dropped - the
-        # skeleton preserves only structural markup.
-
-    def handle_entityref(self, name: str) -> None:
-        # Drop entity references (they are text content).
-        pass
-
-    def handle_charref(self, name: str) -> None:
-        # Drop character references (they are text content).
-        pass
 
     def result(self) -> str:
         return "".join(self._out)
@@ -311,9 +247,7 @@ class _Sanitizer(HTMLParser):
 def sanitize_html(html: str) -> str:
     """Return a structural skeleton of *html* with all text content removed.
 
-    - Text nodes are dropped entirely.
-    - Text *inside* ``gmail_attr`` and ``gmail_sendername`` elements is also
-      suppressed (fixes attribution / sender-name leakage).
+    - Text nodes (including attribution text and sender names) are dropped.
     - ``class`` and ``dir`` values are kept (email addresses redacted).
     - ``style`` keeps each property name and only purely structural values
       (lengths, colors, CSS keywords); anything else becomes a placeholder.

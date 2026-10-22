@@ -1,12 +1,9 @@
 """Pure helpers for building Gmail-web faithful MIME content.
 
-These functions are deliberately synchronous and side-effect free so they can be
-unit-tested in isolation. Network-bound work (People API name resolution, parent
-message fetching) happens in the async Gmail tools, which feed the resulting
-strings into these builders and into ``_prepare_gmail_message``.
-
-The one verbatim external constant here is Gmail's blockquote CSS string
-(``BLOCKQUOTE_STYLE``); it is Gmail's own markup, not user data.
+These functions are synchronous and side-effect free so they can be unit-tested
+in isolation. Network-bound work (fetching the parent or forwarded message)
+happens in the async Gmail tools, which feed the resulting strings into these
+builders and into ``gmail_helpers._prepare_gmail_message_web``.
 """
 
 from __future__ import annotations
@@ -18,14 +15,15 @@ import re
 import secrets
 import unicodedata
 from datetime import datetime
-from email.header import Header
 from email.errors import HeaderParseError, InvalidHeaderDefect
+from email.header import Header
 from email.headerregistry import HeaderRegistry
-from email.utils import encode_rfc2231, formataddr
-from typing import List, Optional, Tuple
+from email.policy import SMTP
+from email.utils import encode_rfc2231, formataddr, getaddresses
+from typing import List, Literal, Optional, Tuple
 
-from gmail.gmail_helpers import _new_attachment_id
-
+TextDirection = Literal["auto", "ltr", "rtl"]
+AddressGroup = Tuple[Optional[str], List[Tuple[str, str]]]
 
 # Gmail's byte-identical blockquote style string for quoted replies.
 BLOCKQUOTE_STYLE = (
@@ -33,22 +31,17 @@ BLOCKQUOTE_STYLE = (
 )
 
 # Three-letter day/month names matching Gmail's attribution line.
-_DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+_DOW = "Mon Tue Wed Thu Fri Sat Sun".split()
+_MON = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
-_MON = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-]
+_ADDRESS_HEADER = HeaderRegistry()
+_PHRASE_SPECIALS = frozenset('()<>[]:;@\\,."')
+_FORWARD_SEPARATOR = "---------- Forwarded message ---------"
+
+
+def _new_attachment_id() -> str:
+    """Return a random attachment id in the shape Gmail web uses (``f_...``)."""
+    return f"f_{secrets.token_hex(5)}"
 
 
 def gmail_boundary() -> str:
@@ -65,11 +58,10 @@ def format_display_address(name: Optional[str], email: str) -> str:
     """Format ``Display Name <email>`` for a header.
 
     - No name -> bare address (so unresolved lookups still send).
-    - Non-ASCII names are RFC2047 encoded-word wrapped.
+    - Non-ASCII or long names are RFC2047 encoded-word wrapped.
     - Names with commas/specials are RFC5322 quoted.
 
-    ``email.utils.formataddr`` handles RFC5322 quoting; for non-ASCII it falls
-    back to RFC2047 via ``email.headerregistry.Address``.
+    ``formataddr`` handles quoting; ``Header`` supplies encoded words.
     """
     # Strip CR/LF/NUL from the address too: formataddr does not sanitize it, so
     # an unvalidated CRLF-bearing address would be RFC5322 header injection.
@@ -77,25 +69,23 @@ def format_display_address(name: Optional[str], email: str) -> str:
     if not name or not name.strip():
         return safe_email
     safe_name = _strip_header_controls(name)
-    try:
-        safe_name.encode("ascii")
+    if safe_name.isascii() and len(safe_name) <= 75:
         # ASCII name: formataddr applies RFC5322 quoting when needed.
         return formataddr((safe_name, safe_email))
-    except UnicodeEncodeError:
-        # Non-ASCII name: RFC2047 encoded-word for the display phrase.
-        encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=998, linesep="\r\n")
-        return f"{encoded_name} <{safe_email}>"
+    # Encoded words also allow long, unbroken display names to fold safely.
+    encoded_name = Header(safe_name, "utf-8").encode(maxlinelen=75, linesep="\r\n")
+    return f"{encoded_name} <{safe_email}>"
 
 
 def format_address_list(value: str) -> str:
     """RFC 2047 encode non-ASCII display names in a To/Cc/Bcc address list.
 
     The list is always validated (a malformed entry raises ``ValueError``). A
-    valid all-ASCII value is then returned unchanged (byte-identical to the
-    input); otherwise each address is reformatted with ``format_display_address``.
+    Valid ASCII values within the line limit are returned unchanged; otherwise
+    each address is reformatted with ``format_display_address``.
     """
     groups = parse_address_list(value)
-    if value.isascii():
+    if value.isascii() and len(value) <= 998:
         return value
     out: List[str] = []
     for group_name, members in groups:
@@ -106,9 +96,6 @@ def format_address_list(value: str) -> str:
             sep = ": " if formatted else ":"
             out.append(f"{_format_group_name(group_name)}{sep}{formatted};")
     return ", ".join(out)
-
-
-AddressGroup = Tuple[Optional[str], List[Tuple[str, str]]]
 
 
 def parse_address_list(value: str) -> List[AddressGroup]:
@@ -141,15 +128,11 @@ def parse_address_list(value: str) -> List[AddressGroup]:
 def _format_group_name(name: str) -> str:
     """Render an RFC 5322 group display name (quoted or RFC 2047 encoded)."""
     safe = _strip_header_controls(name)
-    if not safe.isascii():
-        return Header(safe, "utf-8").encode(maxlinelen=998, linesep="\r\n")
+    if not safe.isascii() or len(safe) > 75:
+        return Header(safe, "utf-8").encode(maxlinelen=75, linesep="\r\n")
     if any(c in _PHRASE_SPECIALS for c in safe):
         return '"' + safe.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return safe
-
-
-_ADDRESS_HEADER = HeaderRegistry()
-_PHRASE_SPECIALS = frozenset('()<>[]:;@\\,."')
 
 
 def _escape_body(text: str) -> str:
@@ -166,13 +149,19 @@ def plain_body_to_html(text: str) -> str:
     Each line becomes ``<div>line</div>``; blank lines become ``<div><br></div>``.
     Returned value is the inner HTML (caller wraps it in the ltr container).
     """
-    lines = text.split("\n")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").expandtabs().split("\n")
     parts = []
     for line in lines:
         if line == "":
             parts.append("<div><br></div>")
         else:
-            parts.append(f"<div>{_escape_body(line)}</div>")
+            # HTML collapses ASCII spaces; preserve indentation and spacing.
+            escaped = re.sub(
+                r"^ +| +$| {2,}",
+                lambda match: "&nbsp;" * len(match.group()),
+                _escape_body(line),
+            )
+            parts.append(f"<div>{escaped}</div>")
     return "".join(parts)
 
 
@@ -208,14 +197,19 @@ def new_message_html(body_html: str, direction: str = "ltr") -> str:
     return f'<div dir="{direction}">{body_html}</div>'
 
 
-def _format_attribution_when(dt: datetime) -> str:
-    """Format the ``On <Dow>, <D> <Mon> <YYYY> at <H>:<MM>`` clause.
+def format_gmail_date(dt: datetime) -> str:
+    """Format ``<Dow>, <D> <Mon> <YYYY> at <H>:<MM>`` as Gmail web renders dates.
 
     Day and hour are NOT zero-padded; minute IS zero-padded.
     """
     dow = _DOW[dt.weekday()]
     mon = _MON[dt.month - 1]
-    return f"On {dow}, {dt.day} {mon} {dt.year} at {dt.hour}:{dt.minute:02d}"
+    return f"{dow}, {dt.day} {mon} {dt.year} at {dt.hour}:{dt.minute:02d}"
+
+
+def _format_attribution_when(dt: datetime) -> str:
+    """Format the ``On <Dow>, <D> <Mon> <YYYY> at <H>:<MM>`` clause."""
+    return f"On {format_gmail_date(dt)}"
 
 
 def format_attribution_plain(name: str, email: str, dt: datetime) -> str:
@@ -269,115 +263,72 @@ def build_quote_container_html(attribution_html: str, parent_html: str) -> str:
     )
 
 
-def render_forward_recipients_html(raw_header: str) -> str:
-    """Render a raw address-list header (To/Cc) as Gmail-web forwarded-header HTML.
+def _render_recipients_html(raw_header: str) -> str:
+    """Render a raw To/Cc header the way Gmail's forwarded block shows it.
 
-    Each recipient becomes ``{name} &lt;<a href="mailto:addr">addr</a>&gt;`` when it
-    carries a display name, or a bare ``<a href="mailto:addr">addr</a>`` when it does
-    not (matching Gmail's forwarded To: rendering). Names and addresses are HTML-escaped.
+    Each recipient becomes ``Name &lt;<a href="mailto:addr">addr</a>&gt;``, or
+    just the link when it has no display name.
     """
-    from email.utils import getaddresses
-
     parts = []
-    for name, email in getaddresses([raw_header or ""]):
+    for name, email in getaddresses([raw_header]):
         if not email:
             continue
-        esc_email = _html.escape(email)
-        link = f'<a href="mailto:{esc_email}">{esc_email}</a>'
-        if name and name.strip():
-            parts.append(f"{_escape_body(name)} &lt;{link}&gt;")
-        else:
-            parts.append(link)
+        safe_email = _html.escape(email)
+        link = f'<a href="mailto:{safe_email}">{safe_email}</a>'
+        parts.append(f"{_escape_body(name)} &lt;{link}&gt;" if name.strip() else link)
     return ", ".join(parts)
 
 
 def build_forwarded_container_html(
-    from_name: Optional[str],
-    from_email: str,
-    date_str: str,
-    subject: str,
-    to_rendered: str,
-    orig_html: str,
+    from_name: str, from_email: str, date: str, subject: str, to: str, orig_html: str
 ) -> str:
-    """Assemble the Gmail-web ``gmail_quote_container`` div for a forwarded message.
+    """Assemble Gmail's ``gmail_quote_container`` for a forwarded message.
 
-    The attribution block follows Gmail's exact forward header layout:
-    a ``---------- Forwarded message ---------`` separator followed by
-    From/Date/Subject/To lines inside a ``gmail_attr`` div.  No blockquote
-    is used - forwarded content is embedded directly after the attr div.
-
-    Args:
-        from_name: Sender display name; empty/whitespace → bare-email rendering.
-        from_email: Sender email address.
-        date_str: Pre-formatted date string (passed through verbatim).
-        subject: Email subject (HTML-escaped by this function).
-        to_rendered: Pre-rendered recipient HTML (inserted verbatim).
-        orig_html: Original message HTML body (inserted verbatim).
-
-    Returns:
-        A string containing the full forwarded container div.
+    The ``gmail_attr`` header block (separator, From, Date, Subject, To) is
+    followed directly by the original HTML; unlike a reply there is no
+    blockquote. ``from_name`` or ``from_email`` may be empty; ``to`` is the raw
+    header value and ``orig_html`` is inserted verbatim.
     """
-    safe_email = _html.escape(from_email)
-    safe_subject = _escape_body(subject)
-
-    if from_name and from_name.strip():
-        safe_name = _escape_body(from_name)
-        from_field = (
-            f'<strong class="gmail_sendername" dir="auto">{safe_name}</strong> '
+    from_fields = []
+    if from_name:
+        from_fields.append(
+            f'<strong class="gmail_sendername" dir="auto">{_escape_body(from_name)}</strong>'
+        )
+    if from_email:
+        safe_email = _html.escape(from_email)
+        from_fields.append(
             f'<span dir="auto">&lt;<a href="mailto:{safe_email}">{safe_email}</a>&gt;</span>'
         )
-    else:
-        from_field = f'<span dir="auto">&lt;<a href="mailto:{safe_email}">{safe_email}</a>&gt;</span>'
-
     attr_div = (
         '<div dir="ltr" class="gmail_attr">'
-        "---------- Forwarded message ---------<br>"
-        f"From: {from_field}<br>"
-        f"Date: {_escape_body(date_str)}<br>"
-        f"Subject: {safe_subject}<br>"
-        f"To: {to_rendered}<br>"
+        f"{_FORWARD_SEPARATOR}<br>"
+        f"From: {' '.join(from_fields)}<br>"
+        f"Date: {_escape_body(date)}<br>"
+        f"Subject: {_escape_body(subject)}<br>"
+        f"To: {_render_recipients_html(to)}<br>"
         "</div>"
     )
-
     return f'<div class="gmail_quote gmail_quote_container">{attr_div}{orig_html}</div>'
 
 
 def build_forwarded_plain(
-    from_name: Optional[str],
-    from_email: str,
-    date_str: str,
-    subject: str,
-    to_rendered_plain: str,
-    orig_plain: str,
+    from_name: str, from_email: str, date: str, subject: str, to: str, orig_plain: str
 ) -> str:
-    """Assemble the plain-text body for a forwarded message.
+    """Assemble Gmail's plain-text forwarded block.
 
-    Follows Gmail's exact plain-text forward layout: a separator line,
-    From/Date/Subject/To header lines, a blank line, then the original body
-    verbatim (NOT ``> ``-quoted).
-
-    Args:
-        from_name: Sender display name; empty/whitespace → bare email only.
-        from_email: Sender email address.
-        date_str: Pre-formatted date string.
-        subject: Email subject (not escaped - plain text context).
-        to_rendered_plain: Pre-rendered plain-text recipient string.
-        orig_plain: Original message plain-text body (inserted verbatim).
-
-    Returns:
-        A plain-text string with the forwarded message structure.
+    The header lines are followed by a blank line and the original body
+    verbatim (not ``> ``-quoted).
     """
-    if from_name and from_name.strip():
+    if from_name and from_email:
         from_field = f"{from_name} <{from_email}>"
     else:
-        from_field = from_email
-
+        from_field = from_name or from_email
     return (
-        "---------- Forwarded message ---------\n"
+        f"{_FORWARD_SEPARATOR}\n"
         f"From: {from_field}\n"
-        f"Date: {date_str}\n"
+        f"Date: {date}\n"
         f"Subject: {subject}\n"
-        f"To: {to_rendered_plain}\n"
+        f"To: {to}\n"
         "\n"
         f"{orig_plain}"
     )
@@ -386,54 +337,25 @@ def build_forwarded_plain(
 def _qp_encode(text: str) -> str:
     """Quoted-printable encode text with CRLF line endings (76-col soft wrap)."""
     # Normalize to CRLF so quopri's soft-wrapping operates on canonical lines.
-    raw = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
-    encoded = quopri.encodestring(raw).decode("ascii")
+    # quopri passes a bare CR through unencoded, so it becomes a line break too
+    # (as EmailMessage does) rather than an RFC 5322-invalid lone CR on the wire.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n")
+    encoded = quopri.encodestring(lines.replace("\n", "\r\n").encode("utf-8"))
     # binascii.b2a_qp emits bare-LF soft breaks ("=\n") when the input has no
-    # CRLF to imitate (a single-line HTML part). A data CR is always encoded as
-    # =0D, so every raw LF is a line ending and can be canonicalized to CRLF.
-    return encoded.replace("\r\n", "\n").replace("\n", "\r\n")
+    # CRLF to imitate (a single-line HTML part); canonicalize those to CRLF.
+    return encoded.decode("ascii").replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 def choose_cte(text: str) -> str:
-    """Choose Content-Transfer-Encoding for a text body part.
+    """Choose the smaller Content-Transfer-Encoding for a text body part.
 
-    Returns ``"base64"`` if base64 encoding of the UTF-8 bytes is strictly
-    smaller than quoted-printable; otherwise returns ``"quoted-printable"``.
-
-    This is a size-minimizing rule that approximates Gmail's per-part CTE
-    selection: mostly-ASCII/Latin bodies favour QP (since base64 inflates
-    ASCII by ~33 %), while heavily non-ASCII bodies (e.g. Hebrew, CJK) favour
-    base64 because QP expands every non-ASCII byte to ``=XX`` (3 bytes each).
-    QP wins all ties and the all-ASCII case.
-
-    The computation is O(len(text)) with no materialisation of full output -
-    just length arithmetic on the UTF-8 byte sequence.
+    Mirrors Gmail's per-part choice: mostly-ASCII/Latin bodies come out
+    smaller as ``quoted-printable`` (which wins ties), heavily non-ASCII bodies
+    (Hebrew, CJK) as ``base64``.
     """
-    raw = text.encode("utf-8")
-    if not raw:
-        return "quoted-printable"
-
-    # --- QP size estimate ---
-    # quopri encodes each byte that is not a printable ASCII safe-char as =XX
-    # (3 bytes).  Safe bytes are kept as-is (1 byte), but long lines get a
-    # soft-wrap ``=\r\n`` (3 bytes) every 75 content bytes.  We use a conservative
-    # per-byte count: non-printable/non-safe → 3, otherwise 1; then add ~4 %
-    # overhead for soft line-wraps (worst case one wrap per 75 bytes → 3 extra).
-    # In practice the dominant factor is the =XX expansion, so this is accurate
-    # enough to pick the same winner as computing `len(quopri.encodestring(raw))`.
-    _QP_SAFE = frozenset(b" \t\r\n" + bytes(range(33, 127))) - {ord("=")}
-    qp_bytes = sum(1 if b in _QP_SAFE else 3 for b in raw)
-    # Add soft-wrap overhead: one `=\r\n` per 75 output bytes of content.
-    qp_size = qp_bytes + (qp_bytes // 75) * 3
-
-    # --- base64 size estimate ---
-    # base64 expands 3 raw bytes → 4 chars; lines are wrapped at 76 cols with
-    # CRLF (2 bytes).  Padding rounds up to the next multiple of 3.
-    b64_chars = ((len(raw) + 2) // 3) * 4
-    b64_lines = (b64_chars + 75) // 76  # number of CRLF line endings
-    b64_size = b64_chars + b64_lines * 2
-
-    return "base64" if b64_size < qp_size else "quoted-printable"
+    if len(_b64_text(text)) < len(_qp_encode(text)):
+        return "base64"
+    return "quoted-printable"
 
 
 def _b64_text(text: str) -> str:
@@ -442,16 +364,9 @@ def _b64_text(text: str) -> str:
 
 
 def _alternative_parts(plain_text: str, html_text: str, boundary: str) -> str:
-    """Return the body of a ``multipart/alternative`` subtree (no top-level headers).
+    """Return the text/plain and text/html parts bounded by ``boundary``.
 
-    Emits the two body parts (text/plain + text/html, UTF-8) bounded by
-    ``boundary``, suitable for use both as a standalone message body and as a
-    child part within a ``multipart/mixed`` message.
-
-    The Content-Transfer-Encoding for each part is chosen independently via
-    :func:`choose_cte`: mostly-ASCII/Latin bodies use ``quoted-printable``
-    (preserving existing behaviour byte-for-byte); heavily non-ASCII bodies
-    (e.g. Hebrew, CJK) switch to ``base64`` where it is more compact.
+    Each part's Content-Transfer-Encoding is chosen by :func:`choose_cte`.
     """
     crlf = "\r\n"
 
@@ -487,14 +402,26 @@ def assemble_alternative(
     The ``Content-Type`` header for the top-level multipart is appended here so
     its boundary always matches ``boundary``.
 
-    Both body parts use ``charset="UTF-8"`` (uppercase, double-quoted).  The
-    ``Content-Transfer-Encoding`` for each part is chosen independently via
-    :func:`choose_cte` - ``quoted-printable`` for ASCII/Latin content,
-    ``base64`` for heavily non-ASCII content (e.g. Hebrew, CJK).  Returns the
-    message as a string with CRLF separators (ready for base64url encoding).
+    Both body parts use ``charset="UTF-8"`` (uppercase, double-quoted). Returns
+    the message with CRLF separators, ready for :func:`encode_raw`.
     """
     crlf = "\r\n"
-    lines: List[str] = [f"{name}: {value}" for name, value in headers]
+    policy = SMTP.clone(max_line_length=76)
+    lines: List[str] = []
+    for name, value in headers:
+        if name == "Subject":
+            lines.append(policy.fold(name, value).removesuffix(crlf))
+        else:
+            # Refolding address headers through HeaderRegistry can insert
+            # literal spaces between adjacent encoded words on Python 3.12.
+            folded = Header(value, header_name=name).encode(maxlinelen=76, linesep=crlf)
+            lines.append(f"{name}: {folded}")
+    if any(
+        len(line.encode("utf-8")) > 998
+        for header in lines
+        for line in header.split(crlf)
+    ):
+        raise ValueError("Header contains a token too long to fit an RFC 5322 line.")
     lines.append(f'Content-Type: multipart/alternative; boundary="{boundary}"')
     head = crlf.join(lines)
     return crlf.join([head, "", _alternative_parts(plain_text, html_text, boundary)])
@@ -597,6 +524,7 @@ def _inline_part(
             f"Content-Type: {_safe_mime_type(mime_type)}; {name_param}",
             "Content-Transfer-Encoding: base64",
             f"Content-ID: {cid}",
+            f"X-Attachment-Id: {cid[1:-1]}",
             f"Content-Disposition: inline; {filename_param}",
             "",
             _b64_crlf(data),

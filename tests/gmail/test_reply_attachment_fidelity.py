@@ -23,7 +23,7 @@ from gmail.gmail_tools import (
     _split_resolved_attachments,
 )
 from core.utils import UserInputError
-from tools.golden_skeleton import extract_skeleton
+from tests.gmail.golden_skeleton import extract_skeleton
 
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
