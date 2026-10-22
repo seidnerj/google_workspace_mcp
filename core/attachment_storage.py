@@ -430,8 +430,6 @@ def get_attachment_url(file_id: str) -> str:
     if gcs_files_enabled():
         return get_gcs_attachment_storage().get_signed_url(file_id)
 
-    from core.config import WORKSPACE_MCP_PORT, WORKSPACE_MCP_BASE_URI
-
     # In stdio mode the attachment route is served by the lazily-started callback
     # server; bring it up now so the URL we hand out is actually reachable. The
     # import is local to avoid pulling the FastAPI/uvicorn auth stack into this
@@ -445,6 +443,10 @@ def get_attachment_url(file_id: str) -> str:
             "unreachable: %s",
             error_msg,
         )
+
+    # Resolve the port only after the listener is ensured: the stdio ephemeral
+    # path publishes the port it bound into os.environ.
+    from core.config import WORKSPACE_MCP_PORT, WORKSPACE_MCP_BASE_URI
 
     # Use external URL if set (for reverse proxy scenarios)
     external_url = os.getenv("WORKSPACE_EXTERNAL_URL")

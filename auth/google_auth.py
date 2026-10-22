@@ -1461,7 +1461,6 @@ async def get_authenticated_google_service(
             f"[{tool_name}] Valid email '{user_google_email}' provided, initiating auth flow."
         )
 
-        redirect_uri = get_oauth_redirect_uri()
         # Only stdio legacy OAuth depends on the standalone callback server; the
         # helper no-ops in other transports and binds the port lazily (#832).
         from auth.oauth_callback_server import ensure_stdio_oauth_callback_available
@@ -1475,11 +1474,12 @@ async def get_authenticated_google_service(
                 f"Cannot initiate OAuth flow - callback server unavailable{error_detail}"
             )
 
-        # Generate auth URL and raise exception with it
+        # Read the redirect URI only now: in stdio the ephemeral path above
+        # publishes the freshly bound port and reloads the OAuth config.
         auth_response = await start_auth_flow(
             user_google_email=user_google_email,
             service_name=f"Google {service_name.title()}",
-            redirect_uri=redirect_uri,
+            redirect_uri=get_oauth_redirect_uri(),
             principal_source=(
                 "gateway_assertion" if is_trust_gateway_identity() else None
             ),
