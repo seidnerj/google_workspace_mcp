@@ -38,7 +38,7 @@ from auth.oauth_config import (
     is_trust_gateway_identity,
 )
 from core.context import set_fastmcp_session_id
-from core.telemetry import record_authenticated_user
+from core.telemetry import record_authenticated_user, record_google_principal
 from auth.scopes import (
     GMAIL_READONLY_SCOPE,
     GMAIL_SEND_SCOPE,
@@ -382,11 +382,13 @@ async def _authenticate_service(
             f"[{tool_name}] Authenticated {service_name} for "
             f"{target_email} via service-account"
         )
+        record_google_principal("service-account", target_email)
         return service, target_email
 
     if use_oauth21:
         logger.debug(f"[{tool_name}] Using OAuth 2.1 flow")
-        return await get_authenticated_google_service_oauth21(
+        auth_mode = "oauth2.1"
+        service, actual_user_email = await get_authenticated_google_service_oauth21(
             service_name=service_name,
             version=service_version,
             tool_name=tool_name,
@@ -398,7 +400,8 @@ async def _authenticate_service(
         )
     else:
         logger.debug(f"[{tool_name}] Using legacy OAuth 2.0 flow")
-        return await get_authenticated_google_service(
+        auth_mode = "oauth2.0"
+        service, actual_user_email = await get_authenticated_google_service(
             service_name=service_name,
             version=service_version,
             tool_name=tool_name,
@@ -407,6 +410,8 @@ async def _authenticate_service(
             session_id=mcp_session_id,
             allow_auth_flow=allow_auth_flow,
         )
+    record_google_principal(auth_mode, actual_user_email)
+    return service, actual_user_email
 
 
 async def get_authenticated_google_service_oauth21(

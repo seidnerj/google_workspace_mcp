@@ -16,7 +16,7 @@ from Gmail-web" goal).
   scaffolding). Multiple samples per surface had to **agree** on the structural
   signature (MIME `multipart/alternative` shape + scaffolding probes) before the
   skeleton was accepted.
-- **PII:** captured via the committed PII-safe `tools/golden_skeleton.extract_skeleton`.
+- **PII:** captured via the PII-safe `tests/gmail/golden_skeleton.extract_skeleton`.
   All addresses, display names, subjects, dates, and body text are redacted to
   placeholders; the variable quoted-original markup is dropped. Only structural
   scaffolding remains. No personal content is stored here.
@@ -45,7 +45,7 @@ drifts.
 - **Content-Transfer-Encoding is content/part-dependent:** quoted-printable for
   mostly-ASCII parts, base64 for heavily-non-ASCII parts - and it can differ
   *per part* within one message (e.g. a forward with a base64 text/plain and a
-  quoted-printable text/html). Handled by the `choose_cte` heuristic task.
+  quoted-printable text/html). `choose_cte` picks the smaller encoding per part.
 - **Regular attachment part headers** (checked 2026-10-09, 6/6 Gmail-web
   attachments): `Content-Type`, `Content-Disposition`, `Content-Transfer-Encoding`,
   `Content-ID: <f_...>`, `X-Attachment-Id: f_...`, with the Content-ID equal to the
@@ -58,3 +58,4 @@ drifts.
 - `golden_reply_attach.json` - reply with attachment (multipart/mixed).
 - `golden_forward.json` - forward, no attachments.
 - `golden_forward_attach.json` - forward with attachment (multipart/mixed).
+- `golden_inline.json` - inline images plus attachments (mixed > related).
