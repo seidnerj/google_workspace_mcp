@@ -760,6 +760,8 @@ def _quote_dropped_note(quote_target: Optional[Dict[str, Any]], web_path: bool) 
     """Explain in the tool result why a requested quote was left out, if it was."""
     if quote_target is None:
         reason = "the message being replied to could not be loaded from the thread"
+    elif quote_target.get("body_error"):
+        reason = f"its body could not be fetched ({quote_target['body_error']})"
     elif web_path and _web_quote_attribution(quote_target) is None:
         reason = "it has no parseable From address or Date header"
     else:
@@ -1095,10 +1097,14 @@ async def _fetch_thread_reply_context(
         target_msg = next(
             msg for msg, context in zip(messages, message_contexts) if context is target
         )
-        await fetch_attachment_backed_bodies(service, [target_msg])
+        body_errors = await fetch_attachment_backed_bodies(service, [target_msg])
         bodies = _extract_message_bodies(target_msg.get("payload", {}))
         target["text_body"] = bodies.get("text", "")
         target["html_body"] = bodies.get("html", "")
+        # One missing part is derived from the other; only flag a parent with
+        # no usable body at all, so it is not quoted as an empty blockquote.
+        if body_errors and not (target["text_body"] or target["html_body"]):
+            target["body_error"] = "; ".join(body_errors)
 
     return {
         "messages": eligible_contexts,
@@ -3022,10 +3028,14 @@ async def send_gmail_message(
         # caller's body, before any signature or quoted original is attached.
         body = html_newlines_to_br(body)
 
-    quote_target = target_reply if quote_original else None
+    quote_target = (
+        target_reply
+        if quote_original and not (target_reply or {}).get("body_error")
+        else None
+    )
     resolved_attachments = await _resolve_url_attachments(attachments)
     quote_note = (
-        _quote_dropped_note(quote_target, web_path=not resolved_attachments)
+        _quote_dropped_note(target_reply, web_path=not resolved_attachments)
         if quote_original
         else ""
     )
@@ -3640,10 +3650,14 @@ async def draft_gmail_message(
     if thread_id and not (subject or "").strip():
         subject = _inherit_reply_subject(thread_id, target_reply)
 
-    quote_target = target_reply if quote_original else None
+    quote_target = (
+        target_reply
+        if quote_original and not (target_reply or {}).get("body_error")
+        else None
+    )
     resolved_attachments = await _resolve_url_attachments(attachments)
     quote_note = (
-        _quote_dropped_note(quote_target, web_path=not resolved_attachments)
+        _quote_dropped_note(target_reply, web_path=not resolved_attachments)
         if quote_original
         else ""
     )

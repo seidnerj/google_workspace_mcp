@@ -2665,3 +2665,43 @@ async def test_reply_reports_dropped_quote(tool, thread, reason):
     assert result.endswith(
         f" Note: the original message was not quoted because {reason}."
     )
+
+
+def _attachment_backed_parent():
+    """A parent whose text and HTML bodies Gmail stores behind an attachmentId."""
+    message = _thread_message(
+        "<parent@example.com>", from_value="Ada Lovelace <ada@example.com>"
+    )
+    message["id"] = "parent123"
+    message["payload"]["mimeType"] = "multipart/alternative"
+    message["payload"]["parts"] = [
+        {"mimeType": mime_type, "body": {"attachmentId": f"att-{n}", "size": 10}}
+        for n, mime_type in enumerate(("text/plain", "text/html"))
+    ]
+    return {"messages": [message]}
+
+
+@pytest.mark.asyncio
+@_REPLY_TOOLS
+async def test_reply_reports_unfetchable_parent_body(tool):
+    service = _reply_quote_service(_attachment_backed_parent())
+    service.users().messages().attachments().get().execute.side_effect = ValueError(
+        "body fetch failed"
+    )
+
+    result = await _unwrap(tool)(
+        service=service,
+        user_google_email="user@example.com",
+        to="ada@example.com",
+        subject="Meeting tomorrow",
+        body="Thanks!",
+        thread_id="thread123",
+        include_signature=False,
+    )
+
+    assert "gmail_quote" not in _reply_quote_html(service, tool)
+    assert "wrote:" not in _reply_quote_html(service, tool)
+    assert (
+        " Note: the original message was not quoted because its body could not be fetched"
+        in result
+    )
