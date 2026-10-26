@@ -685,3 +685,68 @@ async def test_forward_as_draft_keeps_attachments_and_does_not_send():
     _, attachments = get_body_and_attachments(drafted)
     assert [a.get_filename() for a in attachments] == ["report.pdf"]
     assert attachments[0].get_payload(decode=True) == b"%PDF-1.4"
+
+
+def _attachment_backed_original():
+    """An original whose text and HTML bodies Gmail stores behind an attachmentId."""
+    message = create_mock_message(subject="Big", from_addr="alice@example.com")
+    message["payload"]["mimeType"] = "multipart/alternative"
+    message["payload"]["parts"] = [
+        {"mimeType": mime_type, "body": {"attachmentId": f"att-{n}", "size": 10}}
+        for n, mime_type in enumerate(("text/plain", "text/html"))
+    ]
+    return message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_draft", [False, True], ids=["send", "draft"])
+async def test_forward_fetches_attachment_backed_body(as_draft):
+    def encode(text):
+        return base64.urlsafe_b64encode(text.encode()).decode()
+
+    mock_service = create_mock_service(
+        _attachment_backed_original(),
+        attachments_data=[
+            {"data": encode("Large plain body"), "size": 16},
+            {"data": encode("<p>Large HTML body</p>"), "size": 22},
+        ],
+    )
+    mock_service.users().drafts().create().execute.return_value = {"id": "d1"}
+
+    await _forward_gmail_message_impl(
+        service=mock_service,
+        message_id="msgbig",
+        to="recipient@example.com",
+        user_google_email="me@example.com",
+        as_draft=as_draft,
+    )
+
+    if as_draft:
+        raw = mock_service.users().drafts().create.call_args.kwargs["body"]
+        sent = message_from_bytes(base64.urlsafe_b64decode(raw["message"]["raw"]))
+    else:
+        sent = get_sent_mime_message(mock_service)
+    assert "Large plain body" in get_body_text(sent, subtype="plain")
+    assert "Large HTML body" in get_body_text(sent, subtype="html")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_draft", [False, True], ids=["send", "draft"])
+async def test_forward_refuses_unfetchable_body(as_draft):
+    """Never send or draft a forward whose original body is missing."""
+    mock_service = create_mock_service(
+        _attachment_backed_original(),
+        attachments_data=ValueError("body fetch failed"),
+    )
+
+    with pytest.raises(UserInputError, match="body could not be fetched"):
+        await _forward_gmail_message_impl(
+            service=mock_service,
+            message_id="msgbig",
+            to="recipient@example.com",
+            user_google_email="me@example.com",
+            as_draft=as_draft,
+        )
+
+    mock_service.users().messages().send().execute.assert_not_called()
+    mock_service.users().drafts().create().execute.assert_not_called()

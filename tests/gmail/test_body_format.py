@@ -1074,3 +1074,117 @@ async def test_full_export_long_subject_does_not_crash(stdio_storage):
     saved_path = _saved_path(result)
     assert Path(saved_path).exists()
     assert len(Path(saved_path).name) < 255
+
+
+def _attachment_backed_message(message_id: str):
+    """A message whose text and HTML bodies Gmail stores behind an attachmentId."""
+    return {
+        "id": message_id,
+        "payload": {
+            "headers": _headers(),
+            "mimeType": "multipart/alternative",
+            "parts": [
+                {
+                    "mimeType": mime_type,
+                    "body": {"attachmentId": f"att-{n}", "size": 10},
+                }
+                for n, mime_type in enumerate(("text/plain", "text/html"))
+            ],
+        },
+    }
+
+
+def _serve_bodies(service, outcome):
+    """Answer attachments().get for the body parts: fetched data, or an error."""
+    execute = service.users().messages().attachments().get().execute
+    if isinstance(outcome, Exception):
+        execute.side_effect = outcome
+    else:
+        execute.side_effect = [
+            {"data": _encode("Large plain body"), "size": 16},
+            {"data": _encode("<p>Large HTML body</p>"), "size": 22},
+        ]
+
+
+async def _read_attachment_backed(tool, outcome):
+    message = _attachment_backed_message("msg-big")
+    service = _build_service(
+        message_responses={
+            ("msg-big", "metadata"): _metadata_response("msg-big"),
+            ("msg-big", "full"): message,
+        },
+        thread_responses={("thread-big", "full"): {"messages": [message]}},
+    )
+    _serve_bodies(service, outcome)
+    args = {
+        get_gmail_message_content: {"message_id": "msg-big"},
+        get_gmail_messages_content_batch: {"message_ids": ["msg-big"]},
+        get_gmail_thread_content: {"thread_id": "thread-big"},
+        get_gmail_threads_content_batch: {"thread_ids": ["thread-big"]},
+    }[tool]
+    return await _unwrap(tool)(
+        service=service, user_google_email="user@example.com", **args
+    )
+
+
+_READ_TOOLS = pytest.mark.parametrize(
+    "tool",
+    [
+        get_gmail_message_content,
+        get_gmail_messages_content_batch,
+        get_gmail_thread_content,
+        get_gmail_threads_content_batch,
+    ],
+    ids=["message", "messages-batch", "thread", "threads-batch"],
+)
+
+
+@pytest.mark.asyncio
+@_READ_TOOLS
+async def test_read_tools_fetch_attachment_backed_body(tool):
+    result = await _read_attachment_backed(tool, "fetched")
+
+    assert "Large plain body" in result
+    assert "could not be fetched" not in result
+
+
+@pytest.mark.asyncio
+@_READ_TOOLS
+async def test_read_tools_report_unfetchable_body(tool):
+    result = await _read_attachment_backed(tool, ValueError("body fetch failed"))
+
+    assert "body could not be fetched" in result
+    assert "body fetch failed" in result
+
+
+@pytest.mark.asyncio
+async def test_full_export_fetches_attachment_backed_body(stdio_storage):
+    result = await _export_attachment_backed("fetched")
+
+    with open(_saved_path(result), "rb") as fh:
+        assert fh.read().decode() == "Large plain body"
+
+
+@pytest.mark.asyncio
+async def test_full_export_reports_unfetchable_body(stdio_storage):
+    result = await _export_attachment_backed(ValueError("body fetch failed"))
+
+    assert result.startswith("Error:")
+    assert "body could not be fetched" in result
+    assert "body fetch failed" in result
+
+
+async def _export_attachment_backed(outcome):
+    service = _build_service(
+        message_responses={
+            ("msg-big", "metadata"): _metadata_response("msg-big"),
+            ("msg-big", "full"): _attachment_backed_message("msg-big"),
+        }
+    )
+    _serve_bodies(service, outcome)
+    return await _unwrap(get_gmail_message_content)(
+        service=service,
+        message_id="msg-big",
+        user_google_email="user@example.com",
+        full=True,
+    )

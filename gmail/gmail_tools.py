@@ -208,6 +208,26 @@ def _extract_message_body(payload):
     return bodies.get("text", "")
 
 
+def _body_fetch_note(errors: List[str]) -> str:
+    """Say in a read result why part of a message's body is missing, if it is."""
+    if not errors:
+        return ""
+    return (
+        "\n[Note: part of this message's body could not be fetched: "
+        f"{'; '.join(errors)}]"
+    )
+
+
+async def _fetch_thread_bodies(service, messages: List[dict]) -> Dict[str, List[str]]:
+    """Fetch each message's attachment-backed bodies; map message ID to its errors."""
+    errors: Dict[str, List[str]] = {}
+    for message in messages:
+        message_errors = await fetch_attachment_backed_bodies(service, [message])
+        if message_errors:
+            errors[message.get("id", "")] = message_errors
+    return errors
+
+
 def _extract_message_bodies(payload):
     """
     Helper function to extract both plain text and HTML bodies from a Gmail message payload.
@@ -470,6 +490,8 @@ async def _export_full_message(
             .get(userId="me", id=message_id, format="full")
             .execute
         )
+        # Large bodies sit behind an attachmentId instead of inline data.
+        body_errors = await fetch_attachment_backed_bodies(service, [message_full])
         bodies = _extract_message_bodies(message_full.get("payload", {}))
         # Preserve the body exactly — the export must be complete — so use .strip()
         # only to test for emptiness, never to trim the content that gets saved.
@@ -504,7 +526,16 @@ async def _export_full_message(
             extension = ".txt"
 
         if not content_str.strip():
-            return "Error: message has no readable body content to export."
+            reason = (
+                f" Its body could not be fetched: {'; '.join(body_errors)}"
+                if body_errors
+                else ""
+            )
+            return f"Error: message has no readable body content to export.{reason}"
+        if body_errors:
+            notes.append(
+                f"Part of the body could not be fetched: {'; '.join(body_errors)}"
+            )
         content_bytes = content_str.encode("utf-8")
 
     # sizeEstimate is intentionally approximate. Enforce the exact decoded
@@ -2506,6 +2537,9 @@ async def get_gmail_message_content(
         .execute
     )
 
+    # Large bodies sit behind an attachmentId instead of inline data.
+    body_errors = await fetch_attachment_backed_bodies(service, [message_full])
+
     # Extract both text and HTML bodies using enhanced helper function
     payload = message_full.get("payload", {})
     bodies = _extract_message_bodies(payload)
@@ -2521,6 +2555,7 @@ async def get_gmail_message_content(
     content_lines = _format_message_header_lines(headers)
     content_lines.append(
         f"\n--- BODY ---\n{body_data or '[No text/plain body found]'}"
+        f"{_body_fetch_note(body_errors)}"
         f"{_render_attached_messages(payload, body_format)}"
     )
 
@@ -2711,12 +2746,19 @@ async def get_gmail_messages_content_batch(
                         body_label = "RAW MIME"
                     else:
                         # Full format - extract body too
+                        body_errors = await fetch_attachment_backed_bodies(
+                            service, [message]
+                        )
                         bodies = _extract_message_bodies(payload)
                         text_body = bodies.get("text", "")
                         html_body = bodies.get("html", "")
-                        body_data = _format_body_content(
-                            text_body, html_body, body_format=body_format
-                        ) + _render_attached_messages(payload, body_format)
+                        body_data = (
+                            _format_body_content(
+                                text_body, html_body, body_format=body_format
+                            )
+                            + _body_fetch_note(body_errors)
+                            + _render_attached_messages(payload, body_format)
+                        )
                         body_label = "BODY"
 
                     attachments = _extract_attachments(payload)
@@ -3601,7 +3643,17 @@ async def _forward_gmail_message_impl(
         .execute
     )
 
+    # Large bodies sit behind an attachmentId instead of inline data. Never send
+    # or draft a forward whose original body is missing; one missing part is
+    # still derived from the other, so only refuse when no body remains.
+    body_errors = await fetch_attachment_backed_bodies(service, [original_message])
     payload = original_message.get("payload", {})
+    original_bodies = _extract_message_bodies(payload)
+    if body_errors and not (original_bodies["text"] or original_bodies["html"]):
+        raise UserInputError(
+            "Not forwarding: the original message's body could not be fetched: "
+            + "; ".join(body_errors)
+        )
 
     # Handle attachments
     attachments_to_send = []
@@ -3677,7 +3729,7 @@ async def _forward_gmail_message_impl(
 
     forward_subject, forward_plain, forward_html = _build_forward_content(
         _extract_headers(payload, ["Subject", "From", "Date", "To"]),
-        _extract_message_bodies(payload),
+        original_bodies,
         forward_message,
         forward_message_format,
         subject,
@@ -4193,6 +4245,8 @@ def _format_thread_content(
     thread_id: str,
     body_format: Literal["text", "html", "raw"] = "text",
     raw_contents: Optional[Dict[str, str]] = None,
+    *,
+    body_errors: Dict[str, List[str]],
 ) -> str:
     """
     Helper function to format thread content from Gmail API response.
@@ -4202,6 +4256,7 @@ def _format_thread_content(
         thread_id (str): Thread ID for display
         body_format: Output format - "text" (default), "html", or "raw"
         raw_contents: Optional mapping of message IDs to decoded raw MIME content
+        body_errors: Message ID to why its attachment-backed body could not be fetched
 
     Returns:
         str: Formatted thread content
@@ -4251,9 +4306,11 @@ def _format_thread_content(
             html_body = bodies.get("html", "")
 
             # Format body content with HTML fallback
-            body_data = _format_body_content(
-                text_body, html_body, body_format=body_format
-            ) + _render_attached_messages(payload, body_format)
+            body_data = (
+                _format_body_content(text_body, html_body, body_format=body_format)
+                + _body_fetch_note(body_errors.get(message.get("id", ""), []))
+                + _render_attached_messages(payload, body_format)
+            )
             body_label = "BODY"
 
         # Extract attachment metadata for this message
@@ -4402,11 +4459,18 @@ async def get_gmail_thread_content(
             service, message_ids, log_prefix="get_gmail_thread_content"
         )
 
+    body_errors = (
+        {}
+        if body_format == "raw"
+        else await _fetch_thread_bodies(service, thread_response.get("messages", []))
+    )
+
     content = _format_thread_content(
         thread_response,
         thread_id,
         body_format=body_format,
         raw_contents=raw_contents,
+        body_errors=body_errors,
     )
 
     if not include_analysis:
@@ -4543,6 +4607,7 @@ async def get_gmail_threads_content_batch(
                     continue
 
                 raw_contents = None
+                body_errors: Dict[str, List[str]] = {}
                 if body_format == "raw":
                     message_ids = [
                         message["id"]
@@ -4554,6 +4619,10 @@ async def get_gmail_threads_content_batch(
                         message_ids,
                         log_prefix="get_gmail_threads_content_batch",
                     )
+                else:
+                    body_errors = await _fetch_thread_bodies(
+                        service, thread.get("messages", [])
+                    )
 
                 output_threads.append(
                     _format_thread_content(
@@ -4561,6 +4630,7 @@ async def get_gmail_threads_content_batch(
                         tid,
                         body_format=body_format,
                         raw_contents=raw_contents,
+                        body_errors=body_errors,
                     )
                 )
 

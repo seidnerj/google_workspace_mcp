@@ -345,4 +345,4 @@ async def test_get_gmail_messages_content_batch_shows_the_wrapped_message():
 
 def test_get_gmail_thread_content_formatter_shows_the_wrapped_message():
     thread = {"messages": [{"id": "m-1", "payload": _nested_payload()}]}
-    _assert_wrapped_message_shown(_format_thread_content(thread, "t-1"))
+    _assert_wrapped_message_shown(_format_thread_content(thread, "t-1", body_errors={}))
