@@ -85,6 +85,7 @@ from gmail.gmail_helpers import (
     _analyze_thread_ownership_impl,
     _build_forward_content,
     _build_web_compose_raw,
+    fetch_attachment_backed_bodies,
     _derive_reply_all_recipients,
     _derive_reply_headers,
     _fetch_with_retry,
@@ -708,6 +709,8 @@ def _quote_dropped_note(quote_target: Optional[Dict[str, Any]]) -> str:
     """Explain in the tool result why a requested quote was left out, if it was."""
     if quote_target is None:
         reason = "the message being replied to could not be loaded from the thread"
+    elif quote_target.get("body_error"):
+        reason = f"its body could not be fetched ({quote_target['body_error']})"
     elif _web_quote_attribution(quote_target) is None:
         reason = "it has no parseable From address or Date header"
     else:
@@ -1317,10 +1320,6 @@ async def _fetch_thread_reply_context(
             "cc": headers.get("Cc", ""),
             "date": headers.get("Date", ""),
         }
-        if include_bodies:
-            bodies = _extract_message_bodies(payload)
-            context["text_body"] = bodies.get("text", "")
-            context["html_body"] = bodies.get("html", "")
         message_contexts.append(context)
         # Automatic selection only considers actual sent or received messages.
         # Gmail web renders a reaction as a chip on its parent, so a reply
@@ -1343,6 +1342,20 @@ async def _fetch_thread_reply_context(
                 break
     elif eligible_contexts:
         target = eligible_contexts[-1]
+
+    if include_bodies and target:
+        target_msg = next(
+            msg for msg, context in zip(messages, message_contexts) if context is target
+        )
+        # Large bodies sit behind an attachmentId instead of inline data.
+        body_errors = await fetch_attachment_backed_bodies(service, [target_msg])
+        bodies = _extract_message_bodies(target_msg.get("payload", {}))
+        target["text_body"] = bodies.get("text", "")
+        target["html_body"] = bodies.get("html", "")
+        # One missing part is derived from the other; only flag a parent with
+        # no usable body at all, so it is not quoted as an empty blockquote.
+        if body_errors and not (target["text_body"] or target["html_body"]):
+            target["body_error"] = "; ".join(body_errors)
 
     return {
         "messages": eligible_contexts,
@@ -3500,7 +3513,11 @@ async def send_gmail_message(
         in_reply_to=in_reply_to,
         references=references,
         direction=direction,
-        reply_target=target_reply if quote_original else None,
+        reply_target=(
+            target_reply
+            if quote_original and not (target_reply or {}).get("body_error")
+            else None
+        ),
         inline_parts=inline_parts,
         attachment_parts=attachment_parts,
         include_bcc_header=(effective == "api"),
@@ -4124,7 +4141,11 @@ async def draft_gmail_message(
         in_reply_to=in_reply_to,
         references=references,
         direction=direction,
-        reply_target=target_reply if quote_original else None,
+        reply_target=(
+            target_reply
+            if quote_original and not (target_reply or {}).get("body_error")
+            else None
+        ),
         inline_parts=inline_parts,
         attachment_parts=attachment_parts,
         include_bcc_header=True,
