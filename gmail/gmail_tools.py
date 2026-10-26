@@ -99,6 +99,7 @@ from gmail.gmail_helpers import (
     _is_quota_or_rate_limit_error,
     _retryable_result_ids,
     _signature_html_to_text,
+    _web_quote_attribution,
     _wrap_signature_html,
     apply_gmail_filter_to_existing,
     build_label_color,
@@ -692,6 +693,26 @@ def _append_signature_to_body(
         return body
     separator = "\n\n" if body.strip() else ""
     return f"{body}{separator}{signature_text}"
+
+
+def _resolve_quote_original(
+    quote_original: Optional[bool], thread_id: Optional[str]
+) -> bool:
+    """Replies quote the original unless the caller opts out, as Gmail web does."""
+    if quote_original is None:
+        return bool(thread_id)
+    return quote_original and bool(thread_id)
+
+
+def _quote_dropped_note(quote_target: Optional[Dict[str, Any]]) -> str:
+    """Explain in the tool result why a requested quote was left out, if it was."""
+    if quote_target is None:
+        reason = "the message being replied to could not be loaded from the thread"
+    elif _web_quote_attribution(quote_target) is None:
+        reason = "it has no parseable From address or Date header"
+    else:
+        return ""
+    return f" Note: the original message was not quoted because {reason}."
 
 
 def _format_attachment_result(attached_count: int, requested_count: int) -> str:
@@ -3143,11 +3164,11 @@ async def send_gmail_message(
         TextDirection, Field(description=DIRECTION_DESCRIPTION)
     ] = "auto",
     quote_original: Annotated[
-        bool,
+        Optional[bool],
         Field(
-            description="Whether to include the message being replied to as a quoted original. Only has an effect when thread_id is provided. Defaults to false.",
+            description="Whether to include the message being replied to as a quoted original, as Gmail web does. Only has an effect when thread_id is provided. Omit to quote (the default for replies); pass false to send the reply without the quote.",
         ),
-    ] = False,
+    ] = None,
     reply_all: Annotated[
         bool,
         Field(
@@ -3211,8 +3232,10 @@ async def send_gmail_message(
             (e.g., missing gmail.settings.basic scope), the send proceeds without a signature.
             Non-benign failures such as quota/rate-limit or API errors raise ToolError and abort
             the send.
-        quote_original (bool): Whether to append the message being replied to as a quoted
-            original. Only has an effect when thread_id is provided.
+        quote_original (Optional[bool]): Whether to append the message being replied to as a
+            quoted original, as Gmail web does. Only has an effect when thread_id is provided.
+            Omitted means quote; pass False to reply without it. When the quote cannot be
+            built, the reply still sends and the result says why it was left out.
         reply_all (bool): Whether to derive reply-all recipients from the thread: To = the
             sender being replied to, Cc = the other participants, excluding the authenticated
             account and from_email. Requires thread_id. Explicit to/cc win over the derived
@@ -3285,14 +3308,13 @@ async def send_gmail_message(
             thread_id="thread_123"
         )
 
-        # Send a reply-all with the original quoted, deriving headers and
-        # recipients from the thread
+        # Send a reply-all, deriving headers and recipients from the thread
+        # (the original is quoted by default)
         send_gmail_message(
             subject="Re: Meeting tomorrow",
             body="Thanks for the update!",
             thread_id="thread_123",
-            reply_all=True,
-            quote_original=True
+            reply_all=True
         )
 
         # Forward a message with a note
@@ -3395,6 +3417,7 @@ async def send_gmail_message(
     # A reply's headers, recipients and quoted original are all derivable from the
     # thread, so a caller should not have to assemble them by hand. Mirrors
     # draft_gmail_message; one thread fetch serves all three.
+    quote_original = _resolve_quote_original(quote_original, thread_id)
     reply_context = None
     if thread_id and (
         quote_original
@@ -3453,6 +3476,7 @@ async def send_gmail_message(
 
     # Every send (with or without attachments) takes the Gmail-web faithful path.
     resolved_attachments = await _resolve_url_attachments(attachments)
+    quote_note = _quote_dropped_note(target_reply) if quote_original else ""
     inline_parts, attachment_parts, attached_count, attachment_errors = (
         _split_resolved_attachments(resolved_attachments or [])
     )
@@ -3523,7 +3547,7 @@ async def send_gmail_message(
         user_google_email=user_google_email,
         action_label="Email sent",
         attachment_info=attachment_info,
-        trailing_note=name_note,
+        trailing_note=name_note + quote_note,
     )
 
 
@@ -3837,11 +3861,11 @@ async def draft_gmail_message(
         ),
     ] = True,
     quote_original: Annotated[
-        bool,
+        Optional[bool],
         Field(
-            description="Whether to include the original message as a quoted reply. Only has an effect when thread_id is provided. Defaults to false.",
+            description="Whether to include the original message as a quoted reply, as Gmail web does. Only has an effect when thread_id is provided. Omit to quote (the default for replies); pass false to draft the reply without the quote.",
         ),
-    ] = False,
+    ] = None,
     direction: Annotated[
         TextDirection, Field(description=DIRECTION_DESCRIPTION)
     ] = "auto",
@@ -3905,9 +3929,11 @@ async def draft_gmail_message(
             authenticated sender and without a signature.
             Non-benign failures such as quota/rate-limit or API errors raise ToolError and abort
             the draft.
-        quote_original (bool): Whether to include the original message as a quoted reply.
-            Only has an effect when thread_id is provided. When enabled, fetches the
-            original message and appends it below the signature. Defaults to False.
+        quote_original (Optional[bool]): Whether to include the original message as a quoted
+            reply, as Gmail web does. Only has an effect when thread_id is provided. Omitted
+            means quote; pass False to draft without it. When enabled, fetches the original
+            message and appends it below the signature. When the quote cannot be built, the
+            draft is still created and the result says why it was left out.
 
     Returns:
         str: Confirmation message with the created draft's ID.
@@ -4035,6 +4061,7 @@ async def draft_gmail_message(
     draft_body = html_newlines_to_br(body) if body_format == "html" else body
     signature_html = resolved_signature_html if include_signature else ""
 
+    quote_original = _resolve_quote_original(quote_original, thread_id)
     reply_context = None
     if thread_id and (
         quote_original
@@ -4073,6 +4100,7 @@ async def draft_gmail_message(
 
     # Every draft (with or without attachments) takes the Gmail-web faithful path.
     resolved_attachments = await _resolve_url_attachments(attachments)
+    quote_note = _quote_dropped_note(target_reply) if quote_original else ""
     inline_parts, attachment_parts, attached_count, attachment_errors = (
         _split_resolved_attachments(resolved_attachments or [])
     )
@@ -4134,7 +4162,9 @@ async def draft_gmail_message(
     attachment_info = _format_attachment_result(
         attached_count, requested_attachment_count
     )
-    return f"Draft created{attachment_info}! Draft ID: {draft_id}{name_note}"
+    return (
+        f"Draft created{attachment_info}! Draft ID: {draft_id}{name_note}{quote_note}"
+    )
 
 
 def _format_thread_content(
